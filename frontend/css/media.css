@@ -1,0 +1,971 @@
+/* 响应式设计 */
+/* 小屏幕适配 */
+@media (max-width: 480px) {
+    .desktop-only {
+        display: none !important;
+    }
+
+    .mobile-only {
+        display: flex !important;
+    }
+
+    .color-picker {
+        gap: var(--spacing-sm) !important;
+    }
+
+    .color-presets {
+        gap: var(--spacing-xs) !important;
+    }
+
+    #confirm-dialog .modal-content {
+        width: 98%;
+        max-width: 280px !important;
+        margin: 2px;
+        max-height: 50vh !important;
+        border-radius: var(--border-radius-sm);
+        padding: var(--spacing-sm);
+    }
+
+    #task-modal .modal-content,
+    #confirm-dialog.view-modal .modal-content,
+    #settings-modal .modal-content,
+    #data-transfer-modal .modal-content,
+    #data-sync-modal .modal-content,
+    #category-modal .modal-content {
+        width: 100% !important;
+        height: 100% !important;
+        padding: var(--spacing-sm);
+        border-radius: unset !important;
+        max-width: unset !important;
+        max-height: unset !important;
+        margin: 0px;
+    }
+
+    .modal-header {
+        padding: var(--spacing-xs) !important;
+    }
+
+    .modal-header h2 {
+        padding-bottom: 2px;
+        display: block;
+        font-size: 0.83em;
+    }
+
+    .modal-body {
+        padding: var(--spacing-xs) !important;
+        flex: 1;
+        overflow-y: auto;
+    }
+
+    .modal-body p {
+        font-size: var(--font-size-xs) !important;
+        padding: var(--spacing-sm) var(--spacing-xs);
+    }
+
+    .modal-footer {
+        padding: var(--spacing-sm) !important;
+        gap: var(--spacing-xs);
+        padding-bottom: 0px !important;
+    }
+
+    .form-group {
+        margin-bottom: var(--spacing-xs) !important;
+    }
+
+    .form-group label {
+        font-size: var(--font-size-xs);
+        margin-bottom: 0px !important;
+    }
+
+    .form-group input,
+    .form-group textarea,
+    .form-group select,
+    .datetime-inputs input,
+    .datetime-inputs select,
+    .mini-field input,
+    .mini-field select,
+    .recur-section > input,
+    .recur-section > select {
+        padding: var(--spacing-xs) !important;
+        font-size: var(--font-size-xs) !important;
+    }
+
+    .form-group select,
+    .form-group input[type="datetime-local"],
+    .form-group input[type="number"],
+    .form-group input[type="text"],
+    .form-group input[type="time"],
+    .datetime-inputs input,
+    .datetime-inputs select,
+    .mini-field input,
+    .mini-field select,
+    .recur-section > input,
+    .recur-section > select,
+    .time-chip__input {
+        font-size: var(--font-size-xs) !important;
+        height: 30px !important;
+    }
+
+    /* 上面 padding 简写把 .input-wrapper 预留给清空按钮的右侧内边距覆盖掉了，
+       这里补回来（与 481~768px 断点保持一致），避免输入内容压在清空按钮下面 */
+    .input-wrapper input {
+        padding-right: var(--spacing-lg) !important;
+    }
+
+    /* 时间字段：原生「选择时间」图标（::-webkit-calendar-picker-indicator）位于输入框
+       内容区最右侧，与绝对定位的清空按钮几乎贴在一起。这里额外加宽右侧留白并固定图标尺寸，
+       让两者之间留出可点击的间距。 */
+    .datetime-inputs .input-wrapper input[type="time"] {
+        padding-right: 30px !important;
+    }
+
+    .datetime-inputs .input-wrapper input[type="time"]::-webkit-calendar-picker-indicator {
+        width: 18px;
+        height: 18px;
+    }
+
+    .datetime-inputs .input-wrapper > button,
+    .mini-field .input-wrapper > button {
+        right: var(--spacing-xs) !important;
+    }
+
+    .segmented--block {
+        grid-auto-flow: row;
+    }
+
+    .mini-grid--3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .chip-picker--grid {
+        grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
+    }
+
+    .more-options-content, .recurring-options {
+        margin-top: var(--spacing-xs) !important;
+        gap: var(--spacing-sm);
+    }
+
+    .panel-section .action-btn {
+        padding: var(--spacing-sm) !important;
+        border-radius: var(--border-radius) !important;
+        font-weight: 500 !important;
+    }
+
+    .modal-footer button {
+        width: auto !important;
+    }
+
+    .edit-notice {
+        padding: var(--spacing-xs) !important;
+    }
+
+    .datetime-error {
+        font-size: var(--font-size-xs) !important;
+    }
+
+    /* ===== 查看任务详情（复用 #confirm-dialog.view-modal）=====
+       详情内容由 JS 以内联样式写死像素值（标题 20px、字段标签与取值均 14px），
+       在小屏上与列表项的字号、间距不成比例；这里统一降一档并收紧留白。
+       注意：详情 HTML 以 <div> 开头，插入 <p id="confirm-message"> 后会被解析器
+       抬升为 <p> 的兄弟节点，因此选择器统一挂在 .modal-body 下，两种结构都能命中。 */
+    #confirm-dialog.view-modal .modal-content {
+        padding: var(--spacing-xs) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-header h2 {
+        font-size: var(--font-size-sm) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body {
+        padding: var(--spacing-xs) !important;
+        font-size: var(--font-size-xs) !important;
+        line-height: 1.5;
+    }
+
+    #confirm-dialog.view-modal #confirm-message {
+        padding: 0 !important;
+    }
+
+    /* 详情外层容器（JS 内联 padding: 20px） */
+    #confirm-dialog.view-modal .modal-body > div,
+    #confirm-dialog.view-modal #confirm-message > div {
+        padding: var(--spacing-xs) !important;
+    }
+
+    /* 标题块（JS 内联 margin-bottom: 20px） */
+    #confirm-dialog.view-modal .modal-body > div > div:first-child,
+    #confirm-dialog.view-modal #confirm-message > div > div:first-child {
+        margin-bottom: var(--spacing-sm) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body h3 {
+        font-size: var(--font-size-sm) !important;
+        line-height: 1.35 !important;
+        margin-bottom: var(--spacing-xs) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body p {
+        padding: 0 !important;
+        font-size: var(--font-size-xs) !important;
+        line-height: 1.5 !important;
+    }
+
+    /* 小屏可视高度更紧张，描述区域限高再收一档 */
+    #confirm-dialog.view-modal .modal-body .task-detail-description {
+        max-height: 24vh !important;
+    }
+
+    /* 字段网格：保持两列，但收紧行间距 */
+    #confirm-dialog.view-modal .modal-body div[style*="grid-template-columns"] {
+        gap: var(--spacing-sm) !important;
+    }
+
+    /* 字段标签：比取值小一档，突出「标签 -> 取值」的层级而不是互相打架 */
+    #confirm-dialog.view-modal .modal-body strong {
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        margin-bottom: var(--spacing-xs) !important;
+    }
+
+    /* 取值与状态/优先级徽标：同一档字号、同一套圆角与内边距 */
+    #confirm-dialog.view-modal .modal-body strong + span {
+        font-size: var(--font-size-xs) !important;
+        padding: 2px var(--spacing-sm) !important;
+        border-radius: var(--border-radius-sm) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .task-priority {
+        font-size: var(--font-size-xs) !important;
+        padding: 2px var(--spacing-sm) !important;
+        border-radius: 10px !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .task-tag {
+        font-size: 11px !important;
+        padding: 1px var(--spacing-xs) !important;
+        border-radius: 8px !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body div[style*="flex-wrap"] {
+        gap: var(--spacing-xs) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .recurring-badge {
+        font-size: 10px !important;
+        padding: 1px var(--spacing-xs) !important;
+        border-radius: var(--border-radius-sm) !important;
+        margin-left: 2px !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .link-text {
+        font-size: var(--font-size-xs) !important;
+        line-height: 1.5 !important;
+    }
+
+    /* 附件列表：与详情取值保持同一档字号 */
+    #confirm-dialog.view-modal .modal-body .detail-attachment-list {
+        gap: 2px !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .detail-attachment-link,
+    #confirm-dialog.view-modal .modal-body .attachment-item-icon {
+        font-size: var(--font-size-xs) !important;
+    }
+
+    #confirm-dialog.view-modal .modal-body .attachment-size {
+        font-size: 10px !important;
+    }
+
+    .sidebar {
+        position: fixed;
+        left: -280px;
+        top: 0;
+        bottom: 0;
+        z-index: 1000;
+        transition: left 0.3s ease;
+    }
+
+    .sidebar.open {
+        left: 0;
+    }
+
+    .sidebar-overlay.show {
+        display: block;
+    }
+
+    /* 适配右侧搜索栏高度 */
+    .sidebar-header {
+        min-height: auto !important;
+        max-height: 84px !important;
+    }
+
+    #mobile-menu-btn {
+        display: block !important;
+        align-self: flex-start;
+    }
+
+    /* 隐藏搜索栏和筛选栏 */
+    .search-container,
+    .action-buttons {
+        display: none !important;
+    }
+
+    /* 显示更多按钮 */
+    #more-menu-btn {
+        display: block !important;
+        margin-left: auto;
+    }
+
+    /* 调整头部布局 */
+    .app-header {
+        justify-content: space-between;
+        padding: 4px 6px !important;
+        gap: 4px !important;
+        min-height: auto !important;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    /* 优先级筛选器占满第一行 */
+    .priority-filter {
+        grid-column: 1 / -1;
+    }
+
+    /* 更多菜单弹窗样式 */
+    .more-menu-modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        align-items: flex-start;
+        justify-content: flex-end;
+        padding: 56px 16px 16px 16px;
+    }
+
+    .more-menu-modal.show {
+        display: flex;
+    }
+
+    .more-menu-content {
+        background-color: var(--bg-primary);
+        border-radius: var(--border-radius-lg);
+        box-shadow: var(--shadow-lg);
+        width: 100%;
+        max-width: 300px;
+        animation: slideInFromRight 0.3s ease;
+    }
+
+    @keyframes slideInFromRight {
+        from {
+            transform: translateX(100%);
+        }
+        to {
+            transform: translateX(0);
+        }
+    }
+
+    .more-menu-header {
+        padding: var(--spacing-md);
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .more-menu-title {
+        font-size: var(--font-size-lg);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .more-menu-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    .more-menu-item {
+        padding: 0;
+    }
+
+    .more-menu-link {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        text-decoration: none;
+        color: var(--text-primary);
+        transition: var(--transition-fast);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .more-menu-link:last-child {
+        border-bottom: none;
+    }
+
+    .more-menu-link:hover {
+        background-color: var(--bg-secondary);
+    }
+
+    .more-menu-link.active {
+        background-color: var(--primary-color);
+        color: var(--on-primary);
+    }
+
+    .more-menu-icon {
+        font-size: var(--font-size-lg);
+        width: 24px;
+        text-align: center;
+    }
+
+    .more-menu-text {
+        flex: 1;
+        font-size: var(--font-size-base);
+    }
+
+    /* 更多菜单弹窗样式 */
+    .more-menu-modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        align-items: flex-start;
+        justify-content: flex-end;
+        padding: 56px 16px 16px 16px;
+    }
+
+    .more-menu-modal.show {
+        display: flex;
+    }
+
+    .more-menu-content {
+        background-color: var(--bg-primary);
+        border-radius: var(--border-radius-lg);
+        box-shadow: var(--shadow-lg);
+        width: 100%;
+        max-width: 300px;
+        animation: slideInFromRight 0.3s ease;
+    }
+
+    @keyframes slideInFromRight {
+        from {
+            transform: translateX(100%);
+        }
+        to {
+            transform: translateX(0);
+        }
+    }
+
+    .more-menu-header {
+        padding: var(--spacing-md);
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .more-menu-title {
+        font-size: var(--font-size-lg);
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    .more-menu-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    .more-menu-item {
+        padding: 0;
+    }
+
+    .more-menu-link {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-md);
+        padding: var(--spacing-md);
+        text-decoration: none;
+        color: var(--text-primary);
+        transition: var(--transition-fast);
+        border-bottom: 1px solid var(--border-light);
+    }
+
+    .more-menu-link:last-child {
+        border-bottom: none;
+    }
+
+    .more-menu-link:hover {
+        background-color: var(--bg-secondary);
+    }
+
+    .more-menu-link.active {
+        background-color: var(--primary-color);
+        color: var(--on-primary);
+    }
+
+    .more-menu-icon {
+        font-size: var(--font-size-lg);
+        width: 24px;
+        text-align: center;
+    }
+
+    .more-menu-text {
+        flex: 1;
+        font-size: var(--font-size-base);
+    }
+
+    /* 状态和日期筛选器并排 */
+    .status-filter,
+    .due-date-filter {
+        grid-column: auto;
+    }
+
+    /* 筛选器样式优化 */
+    .view-filter,
+    .priority-filter,
+    .status-filter,
+    .due-date-filter {
+        width: 100%;
+        min-width: 0;
+        font-size: 10px !important;
+        padding: var(--spacing-xs) !important;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        border-radius: var(--border-radius-sm);
+        min-height: 28px !important;
+    }
+
+    /* 筛选器hover效果优化 */
+    .view-filter:hover,
+    .priority-filter:hover,
+    .status-filter:hover,
+    .due-date-filter:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 4px rgba(var(--primary-rgb), 0.2);
+    }
+
+    /* 小屏幕任务项优化 */
+    .tasks-container {
+        padding: var(--spacing-xs);
+    }
+
+    .tasks-list {
+        display: flex !important;
+        flex-direction: column;
+        gap: var(--spacing-sm) !important;
+        min-width: 0px !important;
+    }
+
+    /* 卡片自身不透明：操作区上下各内缩 1px 后，
+       这 1px 内缩带显示的是卡片底色，不会透出页面背景或操作按钮 */
+    .small-screen-task-item {
+        background-color: var(--bg-primary);
+    }
+
+    .task-header {
+        gap: 4px !important;
+        width: 100%;
+        height: 100%;
+        background-color: var(--bg-primary);
+        padding: 8px;
+        box-sizing: border-box;
+        z-index: 2;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    /* 小屏卡片内的字号层级：标题 > 描述 > 元信息行（优先级/分类/截止时间/标签）。
+       徽标统一到同一档字号并按比例缩小内边距与圆角，
+       避免徽标与标题同号（甚至更大）抢走视觉重心。 */
+    .task-title {
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        line-height: 1.25 !important;
+        margin-bottom: 0 !important;
+    }
+
+    /* 卡片标题自带 10px 上下留白，小屏中过于松散 */
+    .small-screen-task-item .task-title {
+        padding: 4px 0 2px !important;
+    }
+
+    .task-description {
+        font-size: 11px !important;
+        line-height: 1.35 !important;
+        margin-bottom: 4px !important;
+        -webkit-line-clamp: 1 !important;
+    }
+
+    /* 描述行始终存在：无描述时保留一行高度但不可见（visibility 而非 display），
+       用它把标题与元信息行稳定隔开，卡片高度也不会忽高忽低 */
+    .small-screen-task-item .task-description {
+        flex: 0 0 auto;
+        min-height: 15px;
+    }
+
+    .small-screen-task-item .task-description:empty {
+        visibility: hidden;
+    }
+
+    .task-meta {
+        gap: 4px !important;
+        padding: 0 !important;
+    }
+
+    /* 元信息行内的徽标统一为同一高度（15px）：
+       去掉上下内边距，改用固定高度 + 垂直居中，消除 emoji 与标签边框带来的高度差，
+       使优先级与分类、标签、截止时间看起来等高 */
+    .task-meta .task-priority,
+    .task-meta .task-category {
+        display: inline-flex;
+        align-items: center;
+        height: 15px;
+        padding: 0 6px !important;
+        border-radius: 8px !important;
+        font-size: 10px !important;
+        line-height: 1 !important;
+    }
+
+    /* 标签有 1px 边框，行高相应减去 2px，保证总高度与其他徽标一致 */
+    .task-meta .task-tag {
+        height: 15px;
+        padding: 0 6px !important;
+        border-radius: 8px !important;
+        font-size: 10px !important;
+        line-height: 13px !important;
+    }
+
+    .task-due-date,
+    .task-datetime {
+        height: 15px;
+        font-size: 10px !important;
+        line-height: 15px !important;
+        gap: 2px !important;
+    }
+
+    /* 标题行内的附属徽标（周期/子任务数）跟随标题等比缩小，不再与正文同尺寸 */
+    .task-title .recurring-badge,
+    .task-title .subtask-count {
+        font-size: 10px !important;
+        padding: 1px 4px !important;
+        border-radius: 6px !important;
+        margin-left: 2px !important;
+    }
+
+    .task-checkbox {
+        width: 12px !important;
+        height: 12px !important;
+        margin: 10px 0;
+    }
+
+    .task-checkbox.checked {
+        background-color: var(--primary-color);
+        border-color: var(--primary-color);
+    }
+
+    .task-checkbox.checked::after {
+        font-size: 8px !important;
+        content: '✓';
+        color: var(--on-primary);
+        font-weight: bold;
+    }
+
+    /* 移动端隐藏分页组件 */
+    .pagination {
+        display: none;
+    }
+
+    /* 移动端加载更多指示器 */
+    .loading-more {
+        padding: var(--spacing-md);
+    }
+
+    .loading-more .loading-spinner {
+        width: 20px;
+        height: 20px;
+        border-width: 2px;
+    }
+
+    .loading-more span {
+        font-size: var(--font-size-xs);
+    }
+
+    /* 已经到底了提示 */
+    .no-more-tasks {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--spacing-sm);
+        padding: var(--spacing-lg);
+        color: var(--text-secondary);
+        font-size: var(--font-size-sm);
+    }
+
+    .no-more-text {
+        color: var(--text-secondary);
+    }
+
+    .data-transfer-modal-content, .data-sync-modal-content {
+        width: 95%;
+        max-width: none;
+        margin: 10px auto;
+    }
+
+    .transfer-mode-selector {
+        gap: var(--spacing-sm);
+    }
+
+    .mode-icon {
+        font-size: 20px;
+    }
+
+    .mode-text {
+        font-size: var(--font-size-xs);
+    }
+
+    .tasks-header {
+        display: none !important;
+    }
+
+    .small-screen-task-item.completed .task-title {
+        text-decoration: line-through;
+        color: var(--text-secondary);
+    }
+
+    .task-tags {
+        display: flex !important;
+        flex-wrap: wrap;
+        gap: var(--spacing-xs) !important;
+        width: auto !important;
+        max-width: none !important;
+    }
+
+    .task-actions {
+        display: flex !important;
+        align-items: stretch;
+        transition: var(--transition-fast);
+        position: absolute !important;
+        /* 用 top/right/bottom 定位，并且上下各内缩 1px：
+           1) 原来的 height:100% + margin:1px 会让操作区比卡片内容盒高出 1px，越过卡片下边沿；
+           2) 内缩 1px 后操作区不会贴到卡片上下边沿，
+              即使遇到亚像素取整（小数高度的卡片），露出的也是卡片底色而不是操作按钮颜色。 */
+        top: 1px;
+        right: 0 !important;
+        bottom: 1px;
+        left: auto;
+        width: 80px !important;
+        max-width: none !important;
+        height: auto !important;
+        color: var(--text-white);
+        justify-content: center;
+        border-radius: 0 8px 8px 0;
+        z-index: 1 !important;
+        font-weight: bold;
+        margin: 0 !important;
+        gap: 0 !important;
+        padding: 0px !important;
+    }
+
+    .task-actions .btn {
+        /* 三个操作按钮等宽：均分操作区宽度，
+           避免图标自身宽度不同导致按钮宽度不一致、首个按钮被任务内容遮挡一部分 */
+        flex: 1 1 0;
+        width: auto;
+        min-width: 0;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        padding: 0 !important;
+        font-size: 8px !important;
+        border: 1px solid transparent !important;
+        border-radius: 0 !important;
+    }
+
+    .task-actions .btn.view {
+        background-color: var(--primary-color);
+        color: var(--on-primary);
+    }
+
+    .task-actions .btn.edit {
+        background-color: var(--warning-color);
+        color: var(--on-warning);
+    }
+
+    .task-actions .btn.delete {
+        background-color: var(--danger-color);
+        color: var(--on-danger);
+    }
+
+    .task-actions .btn:hover {
+        border-color: var(--primary-color);
+        color: var(--primary-color);
+    }
+
+    .task-actions .btn.delete:hover {
+        border-color: var(--danger-color);
+        color: var(--danger-color);
+    }
+
+    .import-warning {
+        padding: var(--spacing-sm) !important;
+    }
+
+    .import-warning p {
+        font-size: var(--font-size-sm) !important;
+    }
+
+    .device-item {
+        padding: var(--spacing-sm) !important;
+    }
+
+    .device-name {
+        font-size: var(--font-size-sm) !important;
+    }
+
+    .device-ip {
+        font-size: var(--font-size-xs) !important;
+    }
+
+    .panel-section {
+        padding: var(--spacing-md) 0 !important;
+    }
+
+    .panel-section h3 {
+        font-size: var(--font-size-base) !important;
+    }
+
+    .data-summary p {
+        font-size: var(--font-size-xs) !important;
+        padding: 0px !important;
+    }
+}
+
+/* 中屏幕适配 */
+@media (min-width: 481px) and (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        left: -280px;
+        top: 0;
+        bottom: 0;
+        z-index: 1000;
+        transition: left 0.3s ease;
+    }
+
+    .sidebar.open {
+        left: 0;
+    }
+
+    .sidebar-overlay.show {
+        display: block;
+    }
+
+    .desktop-only {
+        display: block;
+    }
+
+    .main-content {
+        margin-left: 0;
+    }
+
+    .app-header {
+        flex-direction: column;
+        gap: var(--spacing-md);
+        padding: var(--spacing-sm);
+        align-items: stretch;
+    }
+
+    .search-container {
+        max-width: 100%;
+        width: 100%;
+    }
+
+    .action-buttons {
+        width: 100%;
+    }
+
+    .tasks-list {
+        gap: var(--spacing-sm);
+    }
+
+    .task-item {
+        padding: var(--spacing-md);
+        min-height: 100px !important;
+    }
+
+    .task-title {
+        font-size: var(--font-size-base);
+        line-height: 1.4;
+    }
+
+    .task-description {
+        font-size: var(--font-size-sm);
+        line-height: 1.5;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+    }
+
+    .task-meta {
+        gap: var(--spacing-sm);
+    }
+
+    #mobile-menu-btn {
+        display: flex !important;
+        align-self: flex-start;
+    }
+
+    .datetime-inputs {
+        grid-template-columns: 1fr 1fr;
+        gap: var(--spacing-sm);
+    }
+
+    .input-wrapper input {
+        padding-right: var(--spacing-lg);
+    }
+
+    .more-options-section {
+        margin-top: 2px;
+        padding-top: 2px;
+    }
+}
+
+/* 移动端(手机&平板)适配 */
+/* 基于触摸设备检测 */
+@media (max-width: 768px) and (hover: none) and (pointer: coarse) {
+    .desktop-only {
+        display: none !important;
+    }
+
+    .mobile-only {
+        display: flex !important;
+    }
+
+    .mobile-unshown-item, .setting-item-config {
+        display: none !important;
+    }
+
+    .mobile-shown-item {
+        display: flex !important;
+    }
+
+    .tag-module-item .tag-count {
+        display: none;
+    }
+
+    .tag-module-item .tag-action-icon {
+        display: inline-flex;
+        /* 移动端常驻显示操作图标，需覆盖桌面端的 visibility: hidden */
+        visibility: visible;
+    }
+}

@@ -1,0 +1,522 @@
+/* ============================================================================
+   全项目动效规范（新增动效请遵守）
+   ----------------------------------------------------------------------------
+   1. 时长：只能使用下面 5 档变量，禁止再写死秒数
+      - --anim-duration-fast      0.2s  弹窗退场等需要立即完成的反馈
+      - --anim-duration-base      0.28s 常规进出场：滑入、淡入、离场
+      - --anim-duration-slow      0.38s 需要被看清的形变：勾选弹跳、删除线扫过
+      - --anim-duration-emphasis  0.7s  强调类：高亮脉冲、彩纸、落位确认
+      - --anim-duration-loop      1s    循环型：等待期间的呼吸提示
+   2. 缓动：只能使用下面 3 个变量，禁止再写 cubic-bezier
+      - --anim-ease-standard    常规加减速（默认）
+      - --anim-ease-accelerate  离场（先慢后快）
+      - --anim-ease-spring      带回弹的强调
+   3. 无障碍：新增动效必须加入文件末尾 @media (prefers-reduced-motion: reduce)
+      关闭名单；JS 侧涉及等待的动效需先用 Utils.prefersReducedMotion() 判断
+   4. 触发方式：动效类由 JS 添加、动画结束后移除（Utils.playAnimation 已封装
+      移除 → 强制重排 → 重新添加 的重启逻辑）
+   ============================================================================ */
+
+:root {
+    --anim-duration-fast: 0.2s;
+    --anim-duration-base: 0.28s;
+    --anim-duration-slow: 0.38s;
+    --anim-duration-emphasis: 0.7s;
+    --anim-duration-loop: 1s;
+
+    --anim-ease-standard: cubic-bezier(0.2, 0.8, 0.3, 1);
+    --anim-ease-accelerate: cubic-bezier(0.4, 0, 0.9, 0.4);
+    --anim-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    /* 齿轮类图标悬停转动角度（设置中心、列表列配置） */
+    --anim-icon-rotate: 30deg;
+}
+
+/* ==================== 视图切换占位骨架 ====================
+   仅在目标视图首次进入（容器内没有任何内容）时插入，避免与已有内容重叠
+   ================================================================= */
+.view-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+    pointer-events: none;
+}
+
+.view-skeleton > i {
+    display: block;
+    height: 64px;
+    border-radius: var(--border-radius);
+    background-color: var(--bg-tertiary);
+    animation: view-skeleton-pulse var(--anim-duration-loop) ease-in-out infinite;
+}
+
+@keyframes view-skeleton-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 0.85; }
+}
+
+/* ==================== 图标交互反馈 ====================
+   齿轮类图标悬停转动：设置中心入口、任务列表列配置
+   角度与时长统一由 --anim-icon-rotate / --anim-duration-fast 控制
+   ================================================================= */
+#settings-btn,
+.tasks-header-cell .column-config-btn {
+    /* 保留按钮自身的过渡（.btn 的 filter 等），仅把 transform 换成规范的时长 */
+    transition: var(--transition-fast), transform var(--anim-duration-fast) ease;
+}
+
+#settings-btn:hover,
+.tasks-header-cell .column-config-btn:hover {
+    transform: rotate(var(--anim-icon-rotate));
+}
+
+/* ==================== 任务完成 / 重新开启动效 ====================
+   说明：动效类由 js/features/todo.js 的 playToggleAnimation() 动态添加与移除，
+   动画结束后统一刷新列表，避免状态变化时的视觉跳变。
+   ================================================================= */
+
+/* 复选框：等待后端响应期间的呼吸提示 */
+.task-checkbox.is-checking {
+    animation: checkbox-pending var(--anim-duration-loop) ease-in-out infinite;
+}
+
+@keyframes checkbox-pending {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(var(--success-rgb), 0.45); }
+    50% { box-shadow: 0 0 0 5px rgba(var(--success-rgb), 0); }
+}
+
+/* 复选框：勾选/取消瞬间的弹跳 */
+.task-checkbox.check-pop {
+    animation: checkbox-pop var(--anim-duration-slow) var(--anim-ease-spring);
+}
+
+@keyframes checkbox-pop {
+    0% { transform: scale(1); }
+    30% { transform: scale(0.8); }
+    65% { transform: scale(1.15); }
+    100% { transform: scale(1); }
+}
+
+/* 复选框：向外扩散的波纹 */
+.task-checkbox.check-pop::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 2px solid var(--success-color);
+    pointer-events: none;
+    animation: checkbox-ripple var(--anim-duration-slow) ease-out forwards;
+}
+
+@keyframes checkbox-ripple {
+    0% { transform: scale(0.6); opacity: 0.85; }
+    100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* 对勾：由小到大弹出（仅在勾选动画期间生效，避免列表重绘时全部闪烁） */
+.task-checkbox.checked.check-pop::after {
+    animation: check-mark-in var(--anim-duration-base) var(--anim-ease-spring) both;
+}
+
+@keyframes check-mark-in {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.2) rotate(-30deg); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(0deg); }
+}
+
+/* 任务行：完成时的绿色高亮脉冲 */
+.task-item.complete-flash,
+.small-screen-task-item.complete-flash {
+    animation: row-complete-flash var(--anim-duration-emphasis) ease-out;
+}
+
+@keyframes row-complete-flash {
+    0% { background-color: rgba(var(--success-rgb), 0.28); }
+    70% { background-color: rgba(var(--success-rgb), 0.12); }
+    100% { background-color: transparent; }
+}
+
+/* 任务行：重新开启时的橙色高亮脉冲 */
+.task-item.reopen-flash,
+.small-screen-task-item.reopen-flash {
+    animation: row-reopen-flash var(--anim-duration-emphasis) ease-out;
+}
+
+@keyframes row-reopen-flash {
+    0% { background-color: rgba(var(--warning-rgb), 0.22); }
+    100% { background-color: transparent; }
+}
+
+/* 任务行：被当前筛选移出列表时的离场动画 */
+.task-item.is-leaving,
+.small-screen-task-item.is-leaving {
+    pointer-events: none;
+    animation: task-leave var(--anim-duration-base) var(--anim-ease-accelerate) forwards;
+}
+
+@keyframes task-leave {
+    0% { opacity: 1; transform: translateX(0); }
+    100% { opacity: 0; transform: translateX(36px); }
+}
+
+/* 任务标题：删除线由左向右扫过（宽度由 JS 按实际文字宽度设置） */
+.task-item .task-title.strike-sweep,
+.small-screen-task-item .task-title.strike-sweep {
+    position: relative;
+    /* 扫过动画期间先隐藏原生删除线，扫完再显现 */
+    text-decoration-color: transparent !important;
+}
+
+.task-item .task-title.strike-sweep::after,
+.small-screen-task-item .task-title.strike-sweep::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 0;
+    height: 2px;
+    border-radius: 2px;
+    background-color: currentColor;
+    transform: translateY(-1px);
+    pointer-events: none;
+    animation: strike-sweep var(--anim-duration-slow) ease-out forwards;
+}
+
+@keyframes strike-sweep {
+    from { width: 0; }
+    to { width: var(--strike-w, 100%); }
+}
+
+/* 彩纸粒子（Utils.burstConfetti 动态创建，挂在 body 上避免被容器裁剪） */
+.confetti-piece {
+    position: fixed;
+    z-index: 9999;
+    border-radius: 2px;
+    pointer-events: none;
+    opacity: 0;
+    animation: confetti-fly var(--anim-duration-emphasis) var(--anim-ease-standard) forwards;
+    animation-delay: var(--delay, 0ms);
+}
+
+@keyframes confetti-fly {
+    0% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(0.3) rotate(0deg);
+    }
+    70% { opacity: 1; }
+    100% {
+        opacity: 0;
+        transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(1) rotate(var(--rot));
+    }
+}
+
+/* 完成气泡（Utils.popBubble 动态创建） */
+.complete-bubble {
+    position: fixed;
+    z-index: 9999;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.6;
+    color: var(--on-success);
+    background-color: var(--success-color);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+    white-space: nowrap;
+    pointer-events: none;
+    animation: bubble-rise var(--anim-duration-emphasis) var(--anim-ease-standard) forwards;
+}
+
+@keyframes bubble-rise {
+    0% { opacity: 0; transform: translate(-50%, -60%) scale(0.7); }
+    25% { opacity: 1; transform: translate(-50%, -110%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -230%) scale(1); }
+}
+
+/* ==================== 任务列表刷新 ====================
+   筛选切换 / 翻页 / 保存等场景：旧内容淡出 → 换新数据 → 新内容淡入
+   ================================================================= */
+.tasks-list {
+    transition: opacity var(--anim-duration-fast) ease;
+}
+
+.tasks-list.list-refreshing {
+    opacity: 0.45;
+}
+
+.tasks-list.list-enter {
+    animation: list-fade-in var(--anim-duration-base) var(--anim-ease-standard);
+}
+
+@keyframes list-fade-in {
+    from { opacity: 0.45; }
+    to { opacity: 1; }
+}
+
+/* 新建/编辑保存后，高亮定位到对应任务行 */
+.task-item.task-highlight,
+.small-screen-task-item.task-highlight {
+    animation: task-highlight var(--anim-duration-emphasis) ease-out;
+}
+
+@keyframes task-highlight {
+    0% { background-color: rgba(var(--primary-rgb), 0.28); }
+    60% { background-color: rgba(var(--primary-rgb), 0.14); }
+    100% { background-color: transparent; }
+}
+
+/* 删除任务时的离场动画 */
+.task-item.is-removing,
+.small-screen-task-item.is-removing {
+    pointer-events: none;
+    animation: task-leave var(--anim-duration-base) var(--anim-ease-accelerate) forwards;
+}
+
+/* ==================== 内容区切换（统计 / 时间轴等） ====================
+   Utils.beginRefresh() 标记淡出、Utils.endRefresh() 播放淡入
+   ================================================================= */
+.is-refreshing {
+    opacity: 0.45;
+    transition: opacity var(--anim-duration-fast) ease;
+}
+
+.is-enter {
+    animation: content-fade-in var(--anim-duration-base) var(--anim-ease-standard);
+}
+
+@keyframes content-fade-in {
+    from { opacity: 0.45; }
+    to { opacity: 1; }
+}
+
+/* 方向性切换：日历翻月、时间轴翻周，按前进/后退从对应方向滑入 */
+.slide-from-right {
+    animation: slide-in-right var(--anim-duration-base) var(--anim-ease-standard);
+}
+
+.slide-from-left {
+    animation: slide-in-left var(--anim-duration-base) var(--anim-ease-standard);
+}
+
+@keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(28px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-in-left {
+    from { opacity: 0; transform: translateX(-28px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+/* 统计面板：各分区依次入场，避免整块内容一次性闪现 */
+#stats-content.is-enter > * {
+    animation: stats-section-in var(--anim-duration-slow) var(--anim-ease-standard) both;
+}
+
+#stats-content.is-enter > *:nth-child(2) { animation-delay: 0.05s; }
+#stats-content.is-enter > *:nth-child(3) { animation-delay: 0.1s; }
+#stats-content.is-enter > *:nth-child(4) { animation-delay: 0.15s; }
+#stats-content.is-enter > *:nth-child(5) { animation-delay: 0.2s; }
+#stats-content.is-enter > *:nth-child(6) { animation-delay: 0.25s; }
+#stats-content.is-enter > *:nth-child(n+7) { animation-delay: 0.3s; }
+
+@keyframes stats-section-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* 时间轴：拖拽落位后给卡片一个确认脉冲 */
+.task-card.task-card-drop {
+    animation: task-card-drop var(--anim-duration-emphasis) ease-out;
+}
+
+@keyframes task-card-drop {
+    0% {
+        transform: scale(1.06);
+        box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.55);
+    }
+    60% {
+        transform: scale(1);
+        box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.25);
+    }
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0);
+    }
+}
+
+/* ==================== 通用反馈动效 ====================
+   弹窗退场：遮罩淡出 + 内容按各自入场方式反向退出
+   由 Utils.closeModalWithAnimation() 添加 .is-closing 触发
+   ================================================================= */
+.modal.is-closing,
+.qr-code-modal.is-closing,
+.more-menu-modal.is-closing {
+    animation: modal-backdrop-out var(--anim-duration-fast) var(--anim-ease-standard) forwards;
+    /* 退场期间不再响应点击，避免误触弹窗内按钮 */
+    pointer-events: none;
+}
+
+.modal.is-closing .modal-content {
+    animation: modal-content-out var(--anim-duration-fast) var(--anim-ease-standard) forwards;
+}
+
+.qr-code-modal.is-closing .qr-code-content {
+    animation: modal-zoom-out var(--anim-duration-fast) var(--anim-ease-standard) forwards;
+}
+
+.more-menu-modal.is-closing .more-menu-content {
+    animation: menu-slide-out var(--anim-duration-fast) var(--anim-ease-standard) forwards;
+}
+
+@keyframes modal-backdrop-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes modal-content-out {
+    from { opacity: 1; transform: translateY(0); }
+    to { opacity: 0; transform: translateY(-12px) scale(0.98); }
+}
+
+@keyframes modal-zoom-out {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.92); }
+}
+
+@keyframes menu-slide-out {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(100%); }
+}
+
+/* ==================== 提示信息（Toast） ====================
+   堆叠容器：多条提示纵向排列，退场时高度收起，后续提示平滑上移
+   ================================================================= */
+.toast-stack {
+    position: fixed;
+    bottom: var(--spacing-lg);
+    right: var(--spacing-lg);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    z-index: 2000;
+    pointer-events: none;
+}
+
+.toast-stack .toast {
+    position: relative;
+    bottom: auto;
+    right: auto;
+    flex-shrink: 0;
+    margin-top: var(--spacing-sm);
+    overflow: hidden;
+    pointer-events: auto;
+}
+
+.toast-stack .toast.toast-leaving {
+    animation: toast-leave var(--anim-duration-base) var(--anim-ease-standard) forwards;
+}
+
+@keyframes toast-leave {
+    0% {
+        opacity: 1;
+        transform: translateX(0);
+        max-height: 200px;
+        margin-top: var(--spacing-sm);
+    }
+    40% {
+        opacity: 0;
+        transform: translateX(40%);
+        max-height: 200px;
+        margin-top: var(--spacing-sm);
+    }
+    100% {
+        opacity: 0;
+        transform: translateX(40%);
+        max-height: 0;
+        margin-top: 0;
+        padding-top: 0;
+        padding-bottom: 0;
+    }
+}
+
+/* ==================== 加载遮罩 ====================
+   默认不可见（visibility 延迟切换，保证淡入淡出过渡可播放）
+   ================================================================= */
+.loading-overlay {
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--anim-duration-fast) ease, visibility 0s linear var(--anim-duration-fast);
+}
+
+.loading-overlay.loading-visible {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transition: opacity var(--anim-duration-fast) ease, visibility 0s linear 0s;
+}
+
+/* ============================================================================
+   遵循系统"减弱动态效果"设置
+   动效一律关闭，仅保留功能性展示（元素本身仍可见，加载 spinner 的 spin 不关闭）
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+    /* 新增动效 */
+    .task-checkbox.is-checking,
+    .task-checkbox.check-pop,
+    .task-checkbox.check-pop::before,
+    .task-checkbox.checked.check-pop::after,
+    .task-item.complete-flash,
+    .small-screen-task-item.complete-flash,
+    .task-item.reopen-flash,
+    .small-screen-task-item.reopen-flash,
+    .task-item.is-leaving,
+    .small-screen-task-item.is-leaving,
+    .task-item.is-removing,
+    .small-screen-task-item.is-removing,
+    .task-item.task-highlight,
+    .small-screen-task-item.task-highlight,
+    .tasks-list.list-enter,
+    .is-enter,
+    #stats-content.is-enter > *,
+    .slide-from-right,
+    .slide-from-left,
+    .task-card.task-card-drop,
+    .modal.is-closing,
+    .modal.is-closing .modal-content,
+    .qr-code-modal.is-closing,
+    .qr-code-modal.is-closing .qr-code-content,
+    .more-menu-modal.is-closing,
+    .more-menu-modal.is-closing .more-menu-content,
+    .toast-stack .toast.toast-leaving,
+    .view-skeleton > i,
+    .confetti-piece,
+    .complete-bubble,
+    /* 既有入场动画（components.css / main.css / index.html） */
+    .modal-content,
+    .qr-code-modal,
+    .qr-code-content,
+    .more-menu-content,
+    .toast,
+    [class*="skeleton-"] {
+        animation: none !important;
+    }
+
+    .task-title.strike-sweep::after {
+        display: none;
+    }
+
+    /* 图标悬停转动属于装饰性位移，减弱动效下保持静止 */
+    #settings-btn:hover,
+    .tasks-header-cell .column-config-btn:hover {
+        transform: none !important;
+    }
+
+    .loading-overlay,
+    .loading-overlay.loading-visible,
+    .is-refreshing,
+    .tasks-list {
+        transition: none !important;
+    }
+}

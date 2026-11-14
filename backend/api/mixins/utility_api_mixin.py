@@ -1,0 +1,65 @@
+# backend/api/mixins/utility_api_mixin.py
+from typing import Any, Dict, List, Optional
+from backend.utils.response_wrapper import api_handler
+
+class UtilityApiMixin:
+    """工具方法 Mixin"""
+
+    @api_handler
+    def check_calendar_permission(self) -> Dict[str, bool]:
+        """检查（必要时申请）日历权限
+
+        返回 granted（当前是否已授权）与 requested（本次是否发起过系统授权弹窗），
+        前端据此决定是否需要引导用户去系统设置开启。
+        """
+        return self.service.check_calendar_permission()
+
+    @api_handler
+    def get_platform_info(self) -> Dict[str, Any]:
+        """获取运行平台信息
+
+        移动端（Android）没有本地文件选择/打开能力，前端据此限制附件相关操作。
+        """
+        return {'is_mobile': bool(getattr(self, 'is_android', False))}
+
+    @api_handler
+    def set_title_bar_theme(self, dark: bool) -> Dict[str, Any]:
+        """标题栏深浅跟随应用主题。
+
+        由前端在 data-theme 变化时调用（切模式、自定义基底、配色实时预览都会改）。
+        Windows 走 DWM 沉浸式深色模式，其它平台为空实现，返回是否真的应用成功。
+        """
+        return {'applied': self.service.set_title_bar_mode(bool(dark))}
+
+    @api_handler
+    def log(self, level: str, message: str, source: str = 'frontend') -> None:
+        """从前端记录日志
+
+        Args:
+            level: 日志级别（debug, info, warning, error, critical）
+            message: 日志消息
+            source: 日志来源
+        """
+        log = self.service.frontend_logger()
+        level_map = {
+            'debug': log.debug,
+            'info': log.info,
+            'warning': log.warning,
+            'error': log.error,
+            'critical': log.critical
+        }
+
+        log_func = level_map.get(level.lower(), log.info)
+        log_func(f"[{source}] {message}")
+
+    @api_handler
+    def open_in_browser(self, url: str) -> None:
+        import webbrowser
+        webbrowser.open(url)
+
+    @api_handler
+    def export_tasks_excel(self, priority: Optional[str] = None, status: Optional[str] = None,
+                           year: Optional[int] = None, month: Optional[int] = None,
+                           category_id: Optional[str] = None,
+                           tag_ids: Optional[List[str]] = None) -> None:
+        self.service.export_tasks_excel(self.db, priority, status, year, month, category_id, tag_ids)

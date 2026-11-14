@@ -1,0 +1,466 @@
+"""
+数据管理模块 - 负责数据库的导出和导入
+"""
+from __future__ import annotations
+
+import sqlite3
+import json
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+from backend.database import schema
+from backend.utils.logger import LogManager
+
+
+class DataExportManager(LogManager):
+    """数据管理器，负责数据的导出和导入"""
+
+    def __init__(self, data_file: Optional[str] = None) -> None:
+        """初始化数据管理器
+
+        Args:
+            data_file (str, optional): 固定使用指定的数据文件；不传时跟随当前
+                存储目录，用户切换存储目录后会自动解析到新库
+        """
+        super().__init__()
+        self._fixed_path: Optional[str] = None
+        if data_file:
+            self._fixed_path = str(data_file)
+            # 显式指定的路径可能指向尚未存在的目录，这里先补齐
+            Path(data_file).parent.mkdir(parents=True, exist_ok=True)
+
+        # 设置SQLite文本处理，避免编码问题
+        self._text_factory: Callable[[Any], Any] = (
+            lambda x: str(x, 'utf-8', 'replace') if isinstance(x, bytes) else x
+        )
+
+    @property
+    def db_path(self) -> str:
+        """当前数据文件路径。
+
+        之所以按需解析、而不是在构造期冻结：用户可以随时切换存储目录，而本管理器
+        随应用长期存活，路径一旦定格就可能把导出 / 导入指向已被迁走的旧库。这里与
+        主库 TodoDatabase 采取同样的按需解析策略，调用方切换目录后无需再来通知。
+        """
+        if self._fixed_path is not None:
+            return self._fixed_path
+        # 延迟导入：本模块的依赖链会被平台实现引用，顶层互引会成环
+        from backend.storage.service import get_data_file_or_fallback
+        return get_data_file_or_fallback()
+
+    @property
+    def data_file(self) -> Path:
+        """当前数据文件（db_path 的 Path 视图）"""
+        return Path(self.db_path)
+
+    # 获取安全的数据连接
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=15)
+        conn.text_factory = self._text_factory
+        # 与主库保持一致，启用外键级联，避免导入 / 删除时产生孤儿数据
+        conn.execute('PRAGMA foreign_keys = ON')
+        return conn
+
+    @staticmethod
+    def _ensure_attachments_table(cursor: sqlite3.Cursor) -> None:
+        """确保 attachments 表存在（DDL 统一取自 backend.database.schema）"""
+        cursor.execute(schema.TABLE_ATTACHMENTS)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id)')
+
+    # 简单的字符串清理
+    def _clean_str(self, s: Any) -> Any:
+        if s is None or not isinstance(s, str):
+            return s
+        try:
+            return s.encode('utf-8', errors='ignore').decode('utf-8')
+        except:
+            return str(s)
+
+    @staticmethod
+    def _query_rows(cursor: sqlite3.Cursor, sql: str, columns: tuple) -> List[Dict[str, Any]]:
+        """查询指定列并封装为字典列表。
+
+        历史库可能尚未建某些表（如后加的 tags），此时回退为空列表，
+        避免因单张表缺失导致整次导出失败。
+        """
+        try:
+            cursor.execute(sql)
+        except sqlite3.OperationalError:
+            return []
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def export_data(self, include_attachments: bool = True) -> Optional[Dict[str, Any]]:
+        """导出数据库中的所有数据
+
+        Args:
+            include_attachments: 是否导出附件数据（元信息 + 实体文件）。
+                为 False 时不导出任何附件数据。
+
+        Returns:
+            包含所有数据的字典，结构为
+            {'tasks': [...], 'categories': [...], 'tags': [...],
+             'task_tags': [...], 'task_relations': [...],
+             'attachments': [...], 'attachment_files': {...}, 'settings': {...}}
+        """
+        try:
+            self.get_logger.info("路径查询：%s", self.db_path)
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+
+                # 导出任务
+                cursor.execute('SELECT * FROM tasks')
+                tasks = []
+                for row in cursor.fetchall():
+                    task_dict = {
+                        'id': row[0],
+                        'title': row[1],
+                        'description': row[2],
+                        'completed': bool(row[3]),
+                        'priority': row[4],
+                        'category_id': row[5],
+                        'due_date': row[6],
+                        'is_recurring': bool(row[7]) if row[7] is not None else False,
+                        'recurrence_type': row[8],
+                        'recurrence_interval': row[9] if row[9] is not None else 1,
+                        'recurrence_count': row[10],
+                        'parent_task_id': row[11],
+                        'created_at': row[12],
+                        'updated_at': row[13],
+                        # 旧版本导出的文件没有该列，按缺失处理
+                        'recurrence_rule': row[14] if len(row) > 14 else None,
+                    }
+                    tasks.append(task_dict)
+
+                # 导出分类
+                cursor.execute('SELECT * FROM categories')
+                categories = []
+                for row in cursor.fetchall():
+                    category_dict = {
+                        'id': row[0],
+                        'name': row[1],
+                        'color': row[2],
+                        'created_at': row[3]
+                    }
+                    categories.append(category_dict)
+
+                # 导出标签本体
+                tags: List[Dict[str, Any]] = []
+                for tag in self._query_rows(cursor, 'SELECT id, name, color, created_at FROM tags',
+                                            ('id', 'name', 'color', 'created_at')):
+                    tag['name'] = self._clean_str(tag['name'])
+                    tags.append(tag)
+
+                # 导出任务-标签关联（task_tags 是多对多关联表，缺失会导致标签全部丢失）
+                task_tags = self._query_rows(
+                    cursor, 'SELECT task_id, tag_id FROM task_tags', ('task_id', 'tag_id'))
+
+                # 导出父子任务关联（区别于 tasks.parent_task_id，后者仅用于周期性任务）
+                task_relations = self._query_rows(
+                    cursor, 'SELECT sub_task_id, main_task_id, created_at FROM task_relations',
+                    ('sub_task_id', 'main_task_id', 'created_at'))
+
+                # 导出设置
+                cursor.execute('SELECT * FROM settings')
+                settings = {}
+                for row in cursor.fetchall():
+                    try:
+                        settings[row[0]] = json.loads(row[1])
+                    except:
+                        settings[row[0]] = row[1]
+
+                # 导出附件元信息（可选，实体文件随后单独打包）
+                attachments: List[Dict[str, Any]] = []
+                if include_attachments:
+                    try:
+                        cursor.execute('''
+                            SELECT id, task_id, type, name, file_path, url, size, mime_type,
+                                   is_image, created_at, updated_at
+                            FROM attachments
+                        ''')
+                        for row in cursor.fetchall():
+                            attachments.append({
+                                'id': row[0],
+                                'task_id': row[1],
+                                'type': row[2],
+                                'name': row[3],
+                                'file_path': row[4],
+                                'url': row[5],
+                                'size': row[6],
+                                'mime_type': row[7],
+                                'is_image': row[8],
+                                'created_at': row[9],
+                                'updated_at': row[10]
+                            })
+                    except sqlite3.OperationalError:
+                        attachments = []
+            finally:
+                conn.close()
+
+            self.get_logger.info("导出数据无异常")
+
+            result: Dict[str, Any] = {
+                # 1.1：补齐 tags / task_tags / task_relations
+                'version': '1.1',
+                'export_time': str(Path(self.db_path).stat().st_mtime),
+                'tasks': tasks,
+                'categories': categories,
+                'tags': tags,
+                'task_tags': task_tags,
+                'task_relations': task_relations,
+                'attachments': attachments,
+                'settings': settings,
+                'include_attachments': include_attachments
+            }
+            if include_attachments:
+                # 打包附件实体文件（base64），供接收端按原相对路径还原
+                result['attachment_files'] = self._collect_attachment_files(attachments)
+            return result
+
+        except Exception as e:
+            self.get_logger.error(f"导出数据错误: {e}")
+            return None
+
+    def _collect_attachment_files(self, attachments: List[Dict[str, Any]]) -> Dict[str, str]:
+        """打包附件实体文件为 base64（仅 file 类型且本地存在的文件）"""
+        try:
+            from backend.features.attachment.attachment_service import get_attachment_service
+            rel_paths = [
+                a.get('file_path') for a in (attachments or [])
+                if a.get('type', 'file') == 'file' and a.get('file_path')
+            ]
+            return get_attachment_service().collect_files(rel_paths)
+        except Exception as e:
+            self.get_logger.error(f"打包附件实体文件失败: {e}")
+            return {}
+
+    def _restore_attachment_files(self, files: Dict[str, str]) -> int:
+        """还原附件实体文件到本地附件存储目录"""
+        try:
+            from backend.features.attachment.attachment_service import get_attachment_service
+            return get_attachment_service().restore_files(files)
+        except Exception as e:
+            self.get_logger.error(f"还原附件实体文件失败: {e}")
+            return 0
+
+    def import_data(self, data: Dict[str, Any]) -> bool:
+        """导入数据到数据库
+
+        覆盖式导入：先清空各表再写入。中途失败由事务回滚兜底（实测数据不受损），
+        成功则以导入内容为准，导入前的确认与备份由前端提示用户自行导出处理。
+
+        Args:
+            data: 要导入的数据字典
+
+        Returns:
+            导入是否成功
+        """
+        try:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+
+                # 确保目标库结构完整（可能是尚未初始化的全新文件），再清空现有数据
+                schema.create_all(cursor)
+                # 外键已开启，按「先子表后父表」顺序清空，保证覆盖式导入后无残留
+                cursor.execute('DELETE FROM attachments')
+                cursor.execute('DELETE FROM task_tags')
+                cursor.execute('DELETE FROM task_relations')
+                cursor.execute('DELETE FROM tags')
+                cursor.execute('DELETE FROM tasks')
+                cursor.execute('DELETE FROM categories')
+                cursor.execute('DELETE FROM settings')
+
+                # 先导入分类：tasks.category_id 外键引用 categories，必须在任务之前写入
+                for category in data.get('categories', []):
+                    cursor.execute('''
+                        INSERT INTO categories (id, name, color, created_at)
+                        VALUES (?, ?, ?, ?)
+                    ''', (
+                        category['id'],
+                        self._clean_str(category['name']),
+                        category['color'],
+                        category['created_at']
+                    ))
+
+                # 脏数据兜底：任务引用了导出中不存在的分类时置空，避免外键约束导致整批导入失败
+                valid_category_ids = {c['id'] for c in data.get('categories', [])}
+
+                # 导入任务
+                for task in data.get('tasks', []):
+                    cursor.execute('''
+                        INSERT INTO tasks (id, title, description, completed, priority, category_id,
+                                          due_date, is_recurring, recurrence_type, recurrence_interval,
+                                          recurrence_count, parent_task_id, created_at, updated_at,
+                                          recurrence_rule)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        task['id'],
+                        self._clean_str(task['title']),
+                        self._clean_str(task['description']),
+                        task['completed'],
+                        task['priority'],
+                        task['category_id'] if task['category_id'] in valid_category_ids else None,
+                        task['due_date'],
+                        task['is_recurring'],
+                        task['recurrence_type'],
+                        task['recurrence_interval'],
+                        task['recurrence_count'],
+                        task['parent_task_id'],
+                        task['created_at'],
+                        task['updated_at'],
+                        task.get('recurrence_rule')
+                    ))
+
+                # 实际落库的任务集合：后续关联表只挂载存在的任务，避免外键报错
+                valid_task_ids = {task['id'] for task in data.get('tasks', []) if task.get('id')}
+
+                # 导入标签：tags.name 有唯一约束，重名脏数据按名称归并到首个标签，
+                # 并把被归并的 tag_id 映射到保留下来的 id，供 task_tags 回写
+                tag_id_map: Dict[str, str] = {}
+                name_to_id: Dict[str, str] = {}
+                for tag in data.get('tags', []) or []:
+                    tag_id = tag.get('id')
+                    tag_name = self._clean_str(tag.get('name'))
+                    if not tag_id or not tag_name:
+                        continue
+                    canonical_id = name_to_id.get(tag_name)
+                    if canonical_id is None:
+                        canonical_id = tag_id
+                        name_to_id[tag_name] = canonical_id
+                        cursor.execute('''
+                            INSERT INTO tags (id, name, color, created_at)
+                            VALUES (?, ?, ?, ?)
+                        ''', (
+                            canonical_id,
+                            tag_name,
+                            tag.get('color') or '#6c757d',
+                            tag.get('created_at')
+                        ))
+                    tag_id_map[tag_id] = canonical_id
+
+                # 导入任务-标签关联
+                for relation in data.get('task_tags', []) or []:
+                    task_id = relation.get('task_id')
+                    tag_id = tag_id_map.get(relation.get('tag_id'))
+                    if not task_id or not tag_id or task_id not in valid_task_ids:
+                        continue
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO task_tags (task_id, tag_id) VALUES (?, ?)
+                    ''', (task_id, tag_id))
+
+                # 导入父子任务关联
+                for relation in data.get('task_relations', []) or []:
+                    sub_task_id = relation.get('sub_task_id')
+                    main_task_id = relation.get('main_task_id')
+                    if (not sub_task_id or not main_task_id
+                            or sub_task_id not in valid_task_ids
+                            or main_task_id not in valid_task_ids):
+                        continue
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO task_relations (sub_task_id, main_task_id, created_at)
+                        VALUES (?, ?, ?)
+                    ''', (sub_task_id, main_task_id, relation.get('created_at')))
+
+                # calendar_events 记录的是本设备系统日历的事件 ID，跨设备无意义，故不随同步写入；
+                # 但任务已被整体替换，这里清掉指向已不存在任务的残留行
+                cursor.execute('DELETE FROM calendar_events WHERE task_id NOT IN (SELECT id FROM tasks)')
+
+                # 导入设置
+                for key, value in data.get('settings', {}).items():
+                    # 使用 ensure_ascii=False 避免编码问题
+                    value_str = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
+                    cursor.execute('''
+                        INSERT INTO settings (key, value, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ''', (key, value_str))
+
+                # 导入附件元信息（仅在有对应任务时导入，避免产生孤儿数据）
+                for attachment in data.get('attachments', []) or []:
+                    if not attachment.get('task_id'):
+                        continue
+                    cursor.execute('SELECT id FROM tasks WHERE id = ?', (attachment['task_id'],))
+                    if not cursor.fetchone():
+                        continue
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO attachments
+                            (id, task_id, type, name, file_path, url, size, mime_type,
+                             is_image, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        attachment.get('id'),
+                        attachment.get('task_id'),
+                        attachment.get('type', 'file'),
+                        self._clean_str(attachment.get('name')),
+                        attachment.get('file_path'),
+                        attachment.get('url'),
+                        attachment.get('size'),
+                        attachment.get('mime_type'),
+                        attachment.get('is_image', 0),
+                        attachment.get('created_at'),
+                        attachment.get('updated_at')
+                    ))
+
+                conn.commit()
+            finally:
+                conn.close()
+
+            # 还原附件实体文件（如传输方携带附件；未携带则不做任何处理）
+            attachment_files = data.get('attachment_files') or {}
+            if attachment_files:
+                restored = self._restore_attachment_files(attachment_files)
+                self.get_logger.info(f"已还原 {restored} 个附件实体文件")
+
+            self.get_logger.info("数据导入成功")
+            return True
+
+        except Exception as e:
+            self.get_logger.error(f"导入数据错误: {e}")
+            return False
+
+    def get_data_summary(self) -> Optional[Dict[str, Any]]:
+        """获取当前数据摘要
+
+        Returns:
+            包含数据统计信息的字典
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+
+                # 统计任务数
+                cursor.execute('SELECT COUNT(*) FROM tasks')
+                total_tasks = cursor.fetchone()[0]
+
+                # 统计已完成任务
+                cursor.execute('SELECT COUNT(*) FROM tasks WHERE completed = 1')
+                completed_tasks = cursor.fetchone()[0]
+
+                # 统计分类数
+                cursor.execute('SELECT COUNT(*) FROM categories')
+                total_categories = cursor.fetchone()[0]
+
+                # 统计标签数（历史库可能无此表，缺失时按 0 处理）
+                try:
+                    cursor.execute('SELECT COUNT(*) FROM tags')
+                    total_tags = cursor.fetchone()[0]
+                except sqlite3.OperationalError:
+                    total_tags = 0
+
+                # 获取最后更新时间
+                cursor.execute('SELECT MAX(updated_at) FROM tasks')
+                last_updated = cursor.fetchone()[0]
+
+                return {
+                    'total_tasks': total_tasks,
+                    'completed_tasks': completed_tasks,
+                    'total_categories': total_categories,
+                    'total_tags': total_tags,
+                    'last_updated': last_updated
+                }
+            finally:
+                conn.close()
+
+        except Exception as e:
+            self.get_logger.error(f"获取数据摘要错误: {e}")
+            return None

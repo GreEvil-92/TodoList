@@ -1,0 +1,422 @@
+// 时间轴视图管理模块
+
+class TimelineManager {
+    constructor() {
+        // ---------- 数据模型 ----------
+        this.tasks = [];
+        this.startDate = null;
+        this.weekCount = 1;
+        this.max_weeks = 4;
+        this.timelineStartHour = 0;
+        this.timelineEndHour = 24;
+        this.currentDragTaskId = null;
+        this.resizeObserver = null;
+        this._pendingSlide = null; // 待播放的切换方向：'next' | 'prev' | null
+        this._pendingHighlightTaskId = null; // 拖拽落位后需要高亮的卡片
+        // 登记到刷新路由：数据/筛选变更时的重绘由它统一分发。
+        window.refreshRouter?.register('timeline', () => this.renderTimeline());
+    }
+
+    getText(key, fallback) {
+        return window.languageManager ? window.languageManager.getText(key, fallback) : fallback;
+    }
+
+    // 模块初始化：与统计模块一致，只准备状态与事件，不做重量级取数。
+    // 时间轴数据改为按需加载：首次进入时间轴视图时由 viewManager.switchView 触发渲染，
+    // 避免启动时在列表视图里就拉一次时间轴任务。
+    async init() {
+        this.bindEvents();
+        this.startDate = this.getStartOfWeek(new Date());
+        this.weekCount = 1;
+    }
+
+
+    async getTasks(startDate, endDate) {
+        let tasks = [];
+        await Utils.apiCall({
+            apiMethod: 'get_timeline_tasks',
+            // 沿用 ViewFilter 的统一条件，再叠上时间轴特有的周范围
+            apiArgs: [{
+                ...window.viewFilter.build(),
+                dueDateFrom: this.formatDate(startDate),
+                dueDateTo: this.formatDate(endDate)
+            }],
+            onSuccess: (response) => {
+                tasks = this.convertTasks(response.data);
+            }
+        });
+        return tasks;
+    }
+
+    convertTasks(tasks) {
+        return tasks.map(task => {
+            const dueDate = task.dueDate;
+            if (!dueDate) return null; // 若没有 dueDate，可跳过或返回占位
+
+            // 分离日期和时间
+            const [date, time] = dueDate.split('T');
+            const hour = parseInt(time.split(':')[0], 10);
+
+            // 计算时段：时间点归属于前一个整点时段
+            let slotKey;
+            if (hour >= 0 && hour <= 8) {
+                // 0点特殊处理，可根据实际需求改为 '23-24'（跨天）或 '0-1'
+                slotKey = '0-8';
+            } else if (hour > 18 && hour <=23) {
+                slotKey = '18-24';
+            }else {
+                slotKey = `${hour - 1}-${hour}`;
+            }
+
+            return {
+                id: task.id,          // 保留原 ID（若需生成 t1, t2 可改为 `t${index+1}`）
+                title: task.title,
+                date: date,
+                slotKey: slotKey,
+                isRecurring: task?.isRecurring,
+                parentTaskId: task?.parentTaskId,
+                dueDate: task.dueDate,
+                completed: task.completed
+            };
+        }).filter(task => task !== null); // 过滤无效项
+    }
+
+    formatDate(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0'); // 月份从0开始
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    bindEvents() {
+        document.getElementById('prevWeekBtn')?.addEventListener('click', () => this.shiftStartDate(-1));
+        document.getElementById('nextWeekBtn')?.addEventListener('click', () => this.shiftStartDate(1));
+        document.getElementById('weekMinusBtn')?.addEventListener('click', () => this.changeWeekCount(-1));
+        document.getElementById('weekPlusBtn')?.addEventListener('click', () => this.changeWeekCount(1));
+        this.timelineStartHour = 0;
+        this.timelineEndHour = 24;
+        window.addEventListener('resize', () => this.adaptLayoutToViewport());
+    }
+
+    // 辅助函数: 获取某周周一
+    getStartOfWeek(date) {
+        const d = new Date(date);
+        const day = d.getDay();
+        const diff = (day === 0 ? -6 : 1) - day;
+        d.setDate(d.getDate() + diff);
+        d.setHours(0, 0, 0, 0);
+        return d;
+    }
+
+    getEndOfWeek(date) {
+        const d = new Date(date);
+        const day = d.getDay();
+        const diff = (7 - day) % 7; // 到下一个周日
+        d.setDate(d.getDate() + diff);
+        d.setHours(0,0,0,0); // 去除时间部分，只保留日期
+        return d;
+    }
+
+    getDateRange() {
+        let dates = [];
+        let current = new Date(this.startDate);
+        const totalDays = this.weekCount * 7;
+        for (let i = 0; i < totalDays; i++) {
+            let yyyy = current.getFullYear();
+            let mm = String(current.getMonth() + 1).padStart(2, '0');
+            let dd = String(current.getDate()).padStart(2, '0');
+            dates.push(`${yyyy}-${mm}-${dd}`);
+            current.setDate(current.getDate() + 1);
+        }
+        return dates;
+    }
+
+    // 构建时间轴分段 (0-8合并，8-18每小时等分，18-24合并) + 根据显示区间过滤
+    buildTimeSlots() {
+        const fullSegments = [
+            { name: "0:00 - 8:00", key: "0-8", start: 0, end: 8 },
+            ...Array.from({ length: 10 }, (_, i) => {
+                let hour = 8 + i;
+                return { name: `${hour}:00 - ${hour+1}:00`, key: `${hour}-${hour+1}`, start: hour, end: hour+1 };
+            }),
+            { name: "18:00 - 24:00", key: "18-24", start: 18, end: 24 }
+        ];
+        return fullSegments.filter(seg => seg.end > this.timelineStartHour && seg.start < this.timelineEndHour);
+    }
+
+    // 动态调整行高与列宽，确保不出现滚动条（完全自适应）
+    adaptLayoutToViewport() {
+        const container = document.getElementById('timelineContainer');
+        const timeAxisCol = document.querySelector('.time-axis-col');
+        const datesHeader = document.querySelector('.dates-header');
+        const bodyRows = document.querySelector('.body-rows');
+        const timeSlotsElems = document.querySelectorAll('.time-slot-row');
+        const timelineRows = document.querySelectorAll('.timeline-row');
+
+        if (!container) return;
+        const containerHeight = container.clientHeight;
+        const headerHeight = document.querySelector('.dates-header')?.offsetHeight || 48;
+        const availableHeight = containerHeight - headerHeight;
+        const slotCount = timeSlotsElems.length;
+        if (slotCount === 0) return;
+
+        // 动态计算每行高度，使所有行恰好占满可用区域，不留滚动条
+        const rowHeight = Math.max(32, Math.floor(availableHeight / slotCount));
+        timeSlotsElems.forEach(row => {
+            row.style.height = `${rowHeight}px`;
+            row.style.lineHeight = `${rowHeight}px`;
+        });
+        timelineRows.forEach(row => {
+            row.style.height = `${rowHeight}px`;
+        });
+
+        // 动态调整右侧grid-cell内任务卡片字体基准 (通过CSS变量)
+        const dateCount = this.getDateRange().length;
+        // 根据列数动态设定卡片最小字体和间距，列越多字体越小
+        let baseFontScale = Math.min(1, Math.max(0.6, 14 / (dateCount * 0.8)));
+        document.documentElement.style.setProperty('--task-card-scale', baseFontScale);
+        // 直接操控卡片样式内联
+        const cards = document.querySelectorAll('.task-card');
+        cards.forEach(card => {
+            let computedSize = Math.max(9, 14 - dateCount * 0.3);
+            card.style.fontSize = `${Math.min(13, Math.max(9, computedSize))}px`;
+        });
+    }
+
+    // 渲染主视图 + 自适应
+    async renderTimeline() {
+        const dates = this.getDateRange();
+        const timeSlots = this.buildTimeSlots();
+        const container = document.getElementById('timelineGrid');
+        if (!container) return;
+
+        // 取数期间先淡出，渲染完成后淡入或按方向滑入
+        Utils.beginRefresh(container);
+
+        // 周数与天数单位跟随语言：文案里的 {count} 占位由调用方替换（getText 不做参数插值）
+        const weekCountText = this.getText('timelineWeekCount', '{count}周 / 最多4周')
+            .replace('{count}', String(this.weekCount));
+        document.getElementById('weekCountIndicator').innerText = weekCountText;
+        const startDateObj = new Date(this.startDate);
+        const endDateObj = new Date(this.startDate);
+        endDateObj.setDate(endDateObj.getDate() + (this.weekCount*7) - 1);
+        this.tasks = await this.getTasks(startDateObj, endDateObj);
+        const formatMD = (d) => `${d.getMonth()+1}/${d.getDate()}`;
+        const daysText = this.getText('timelineDays', '{count}天').replace('{count}', String(this.weekCount * 7));
+        document.getElementById('dateRangeLabel').innerHTML = `📅 ${formatMD(startDateObj)} - ${formatMD(endDateObj)}  (${daysText})`;
+
+        // 构建左侧列
+        let leftColHtml = `<div class="time-axis-col"><div class="time-header-placeholder">⏰ 时间轴</div>`;
+        timeSlots.forEach(slot => {
+            leftColHtml += `<div class="time-slot-row" data-slot-key="${slot.key}">${slot.name}</div>`;
+        });
+        leftColHtml += `</div>`;
+
+        // 右侧：头部日期 + 主体行
+        let rightHtml = `<div class="dates-grid"><div class="dates-header">`;
+        dates.forEach(dateStr => {
+            const dateObj = new Date(dateStr);
+            const weekdays = ['周日','周一','周二','周三','周四','周五','周六'];
+            const weekdayName = weekdays[dateObj.getDay()];
+            rightHtml += `<div class="date-cell" data-date="${dateStr}" title="${dateStr}">
+                            ${dateStr.slice(5)} <span class="weekday">${weekdayName}</span>
+                          </div>`;
+        });
+        rightHtml += `</div><div class="body-rows">`;
+
+        for (let rowIdx = 0; rowIdx < timeSlots.length; rowIdx++) {
+            const slot = timeSlots[rowIdx];
+            rightHtml += `<div class="timeline-row" data-row-slot="${slot.key}">`;
+            for (let colIdx = 0; colIdx < dates.length; colIdx++) {
+                const dateStr = dates[colIdx];
+                const cellTasks = this.tasks.filter(t => t.date === dateStr && t.slotKey === slot.key);
+                let tasksHtml = '';
+                if (cellTasks.length === 0) {
+                    tasksHtml = `<div class="empty-cell-message" style="font-size:0.6rem;">+</div>`;
+                } else {
+                    cellTasks.forEach(task => {
+                        tasksHtml += `
+                            <div class="task-card ${task.completed ? 'completed' : ''}" draggable="true" data-task-id="${task.id}">
+                                <span class="task-name">${this.escapeHtml(task.title)}</span>
+                                <button class="btn btn--colorless delete-task" data-task-id="${task.id}">✕</button>
+                            </div>
+                        `;
+                    });
+                }
+                rightHtml += `<div class="grid-cell" data-date="${dateStr}" data-slot="${slot.key}">${tasksHtml}</div>`;
+            }
+            rightHtml += `</div>`;
+        }
+        rightHtml += `</div></div>`;
+
+        container.innerHTML = leftColHtml + rightHtml;
+
+        // 播放切换动画（翻周按方向滑入，其余情况淡入）
+        this.applyTimelineTransition(container);
+        // 拖拽落位后高亮对应卡片
+        this.highlightDroppedCard(container);
+
+        // 绑定拖拽事件和删除
+        this.attachDragEvents();
+        this.attachDeleteEvents();
+
+        // 执行自适应布局 (无滚动条)
+        setTimeout(() => {
+            this.adaptLayoutToViewport();
+        }, 10);
+
+        // 监听resize重新适配
+        if (this.resizeObserver) this.resizeObserver.disconnect();
+        this.resizeObserver = new ResizeObserver(() => this.adaptLayoutToViewport());
+        const containerElem = document.getElementById('timelineContainer');
+        if (containerElem) this.resizeObserver.observe(containerElem);
+    }
+
+    // 播放周切换动画：翻周按方向滑入，改变周数等无方向场景走淡入
+    applyTimelineTransition(container) {
+        const direction = this._pendingSlide;
+        this._pendingSlide = null;
+
+        // 滑动入场自带淡入效果，先清掉取数期间的淡出态
+        container.classList.remove('is-refreshing');
+
+        if (direction) {
+            Utils.playAnimation(container, direction === 'next' ? 'slide-from-right' : 'slide-from-left');
+        } else {
+            Utils.endRefresh(container);
+        }
+    }
+
+    // 拖拽落位后高亮新位置的卡片，确认任务已移动
+    highlightDroppedCard(container) {
+        const taskId = this._pendingHighlightTaskId;
+        if (taskId === null || taskId === undefined) return;
+        this._pendingHighlightTaskId = null;
+
+        const card = container.querySelector(`.task-card[data-task-id="${taskId}"]`);
+        if (card) Utils.playAnimation(card, 'task-card-drop', 1000);
+    }
+
+    escapeHtml(str) {
+        return String(str).replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    // 拖拽逻辑
+    attachDragEvents() {
+        const cards = document.querySelectorAll('.task-card');
+        cards.forEach(card => {
+            card.setAttribute('draggable', 'true');
+            card.addEventListener('dragstart', (e) => this.handleDragStart(e));
+            card.addEventListener('dragend', (e) => this.handleDragEnd(e));
+            const delBtn = card.querySelector('.delete-task');
+            if (delBtn) delBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+        });
+        const cells = document.querySelectorAll('.grid-cell');
+        cells.forEach(cell => {
+            cell.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                cell.classList.add('drag-over');
+            });
+            cell.addEventListener('dragleave', () => cell.classList.remove('drag-over'));
+            cell.addEventListener('drop', (e) => this.handleDropOnCell(e));
+        });
+    }
+
+    handleDragStart(e) {
+        const taskCard = e.target.closest('.task-card');
+        if (!taskCard) return;
+        const taskId = taskCard.getAttribute('data-task-id');
+        if (taskId) {
+            this.currentDragTaskId = taskId;
+            e.dataTransfer.setData('text/plain', taskId);
+            e.dataTransfer.effectAllowed = 'move';
+            taskCard.classList.add('dragging');
+        }
+    }
+
+    async handleDragEnd(e) {
+        const draggingCard = document.querySelector('.task-card.dragging');
+        if (draggingCard) draggingCard.classList.remove('dragging');
+        let currentTask = this.tasks.find(t => t.id === this.currentDragTaskId);
+        if (currentTask && (currentTask.isRecurring || currentTask.parentTaskId)) {
+            Utils.showToast(window.languageManager.getText('periodicTaskEditFailed', '周期性任务不支持编辑，请删除后重新创建'), 'warning');
+        } else {
+            const parts = currentTask.slotKey.split('-');
+            // 取结束小时（第二个数字），并补零为两位数；如是24则调整为23
+            const endHour = parts[1].padStart(2, '0') == 24 ? 23 : parts[1].padStart(2, '0');
+            // 拼接为 ISO 日期时间（本地时间，不带时区）
+            const dueDateStr = `${currentTask.date}T${endHour}:00:00`;
+            await Utils.apiCall({
+                apiMethod: 'update_todo',
+                apiArgs: [currentTask.id, { dueDate: dueDateStr }],
+                onError: (error) => {
+                    Utils.showToast(String(error?.message || '').trim(), 'warning');
+                }
+            });
+        }
+        // 截止日期被改写，逾期数等全局统计随之变化，同步刷新顶部统计条与分类计数
+        window.App?.notifyDataChanged();
+
+        this.currentDragTaskId = null;
+        document.querySelectorAll('.grid-cell').forEach(cell => cell.classList.remove('drag-over'));
+    }
+
+    async handleDropOnCell(e) {
+        e.preventDefault();
+        const targetCell = e.currentTarget;
+        targetCell.classList.remove('drag-over');
+        const taskId = e.dataTransfer.getData('text/plain');
+        if (!taskId) return;
+        const targetDate = targetCell.getAttribute('data-date');
+        const targetSlot = targetCell.getAttribute('data-slot');
+        if (!targetDate || !targetSlot) return;
+        const taskIdx = this.tasks.findIndex(t => t.id === taskId);
+        if (taskIdx !== -1) {
+            this.tasks[taskIdx].date = targetDate;
+            this.tasks[taskIdx].slotKey = targetSlot;
+            // 重绘后高亮新位置的卡片
+            this._pendingHighlightTaskId = taskId;
+            await this.renderTimeline();
+        }
+    }
+
+    attachDeleteEvents() {
+        document.querySelectorAll('.delete-task').forEach(btn => {
+            btn.removeEventListener('click', (e) => this.handleDelete(e));
+            btn.addEventListener('click', (e) => this.handleDelete(e));
+        });
+    }
+
+    async handleDelete(e) {
+        e.stopPropagation();
+        const taskId = e.currentTarget.getAttribute('data-task-id');
+        if (taskId) await window.todoManager.deleteTask(taskId);
+    }
+
+    async changeWeekCount(delta) {
+        let newCount = this.weekCount + delta;
+        if (newCount < 1) newCount = 1;
+        if (newCount > this.max_weeks) newCount = this.max_weeks;
+        if (newCount !== this.weekCount) {
+            this.weekCount = newCount;
+            await this.renderTimeline();
+        }
+    }
+
+    async shiftStartDate(deltaWeeks) {
+        let newStart = new Date(this.startDate);
+        newStart.setDate(newStart.getDate() + deltaWeeks * 7);
+        this.startDate = newStart;
+        // 向后翻周从右侧滑入，向前翻周从左侧滑入
+        this._pendingSlide = deltaWeeks > 0 ? 'next' : 'prev';
+        await this.renderTimeline();
+    }
+}
+
+// 创建全局实例
+window.timelineManager = new TimelineManager();

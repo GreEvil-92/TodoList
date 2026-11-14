@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""
+任务到期提醒功能模块
+支持桌面端通知栏消息提醒
+"""
+import queue
+import threading
+import time
+import asyncio
+import platform
+from datetime import datetime
+from pathlib import Path
+from queue import Queue
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from backend.database.todo_database import TodoDatabase
+from backend.utils.logger import LogManager
+
+class TaskReminder(LogManager):
+    """任务到期提醒器"""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.running = False
+        self.check_interval = 30  # 检查间隔(秒),默认30秒
+        self.notification_queue: Queue = Queue()
+        self.db = TodoDatabase()
+        self.notified_tasks: Set[str] = set()  # 已提醒的任务ID集合
+        self.scheduled_tasks: Dict[str, datetime] = {}  # 已安排提醒的任务 {task_id: due_datetime}
+        self.check_thread: Optional[threading.Thread] = None
+        self.asyncio_thread: Optional[threading.Thread] = None
+        self.notify_thread: Optional[threading.Thread] = None
+        self.system = platform.system()
+        self.notifier: Any = None
+        self.loop = asyncio.new_event_loop()
+
+    def start(self, click_event: Any) -> None:
+        """启动提醒服务"""
+        if self.running:
+            return
+            
+        self.running = True
+        self.notified_tasks.clear()
+        self.scheduled_tasks.clear()
+
+        # stop() 会关闭事件循环；不重建的话再次 start 时 _run_asyncio 在已关闭
+        # 的 loop 上 run_forever() 会抛 RuntimeError，通知将永久静默失效
+        if self.loop is None or self.loop.is_closed():
+            self.loop = asyncio.new_event_loop()
+        
+        # 启动检查线程
+        self.check_thread = threading.Thread(target=self._check_tasks, daemon=True)
+        self.check_thread.start()
+
+        # 专门负责运行 asyncio 循环的线程
+        self.asyncio_thread = threading.Thread(target=self._run_asyncio, daemon=True)
+        self.asyncio_thread.start()
+
+        # 启动通知线程
+        self.notify_thread = threading.Thread(target=self._process_notifications, daemon=True, args=(click_event,))
+        self.notify_thread.start()
+        
+        self.get_logger.info("任务到期提醒服务已启动")
+        
+    def stop(self) -> None:
+        if not self.running:
+            return
+        self.running = False
+
+        # 停止事件循环
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+        # 等待 asyncio 线程结束
+        if self.asyncio_thread and self.asyncio_thread.is_alive():
+            self.asyncio_thread.join(timeout=3)
+
+        # 关闭事件循环（释放 WinRT 相关资源）
+        if self.loop and not self.loop.is_closed():
+            self.loop.close()
+
+        # 等待其他线程
+        if self.check_thread and self.check_thread.is_alive():
+            self.check_thread.join(timeout=1)
+        if self.notify_thread and self.notify_thread.is_alive():
+            self.notify_thread.join(timeout=1)
+
+        self.get_logger.info("任务到期提醒服务已停止")
+        
+    def _check_tasks(self) -> None:
+        """后台线程检查任务到期"""
+        while self.running:
+            try:
+                # 到期判定只看截止时间，取轻量候选集即可：
+                # 不必每 30 秒拉一次整份任务（描述 / 周期规则 / 标签 / 附件都用不上）
+                tasks = self.db.get_reminder_candidates()
+                now = datetime.now()
+                
+                for task in tasks:
+                    # 跳过已完成的任务
+                    if task['completed']:
+                        continue
+                        
+                    # 跳过没有截止时间的任务
+                    if not task.get('dueDate'):
+                        continue
+                        
+                    # 解析截止时间
+                    try:
+                        due_date = datetime.fromisoformat(task['dueDate'])
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    task_id = task['id']
+                    
+                    # 检查任务是否到期
+                    if now >= due_date:
+                        # 如果任务已过期且未被提醒过
+                        if task_id not in self.notified_tasks:
+                            # 添加到提醒队列
+                            self.notification_queue.put({
+                                'task_id': task_id,
+                                'title': task['title'],
+                                'due_date': due_date,
+                                'priority': task.get('priority', 'none')
+                            })
+                            
+                            # 记录已提醒的任务
+                            self.notified_tasks.add(task_id)
+                    else:
+                        # 未到期的任务,记录以便后续检查
+                        self.scheduled_tasks[task_id] = due_date
+                
+                # 清理已完成任务的提醒记录
+                self._cleanup_completed_tasks(tasks)
+                
+            except Exception as e:
+                self.get_logger.error(f"检查任务时出错: {e}")
+            
+            # 等待下一次检查
+            time.sleep(self.check_interval)
+
+    def _run_asyncio(self) -> None:
+        # 专门负责运行 asyncio 循环的线程
+        import asyncio
+        asyncio.set_event_loop(self.loop)
+        from desktop_notifier import DesktopNotifier, Icon
+
+        icon_path = Path(self.service.get_app_icon(self.service.get_code_dir()))
+        app_icon = Icon(path=icon_path) if icon_path.exists() else None
+
+        self.notifier = DesktopNotifier(
+            app_name="TodoList",
+            app_icon=app_icon,
+            notification_limit=5,
+        )
+        self.loop.run_forever()
+
+    def _cleanup_completed_tasks(self, current_tasks: List[Dict[str, Any]]) -> None:
+        """清理已完成或已删除任务的记录"""
+        current_task_ids = {task['id'] for task in current_tasks}
+        
+        # 清理已删除任务的通知记录
+        to_remove = []
+        for task_id in list(self.notified_tasks):
+            if task_id not in current_task_ids:
+                to_remove.append(task_id)
+        
+        for task_id in to_remove:
+            self.notified_tasks.discard(task_id)
+            self.scheduled_tasks.pop(task_id, None)
+            
+    def _process_notifications(self, click_event: Any = None) -> None:
+        """处理提醒通知"""
+        while self.running:
+            try:
+                notification_msg = self.notification_queue.get(timeout=1)
+                asyncio.run_coroutine_threadsafe(self._show_notification(notification_msg, click_event), self.loop)
+            except queue.Empty:
+                pass
+            except Exception as e:
+                self.get_logger.error(f"处理通知时出错: {e}")
+                pass  # 队列为空或超时
+
+    def _build_notification(self, notification: Dict[str, Any]) -> Tuple[str, str, str]:
+        task_title = notification['title']
+        due_date = notification['due_date']
+        priority = notification['priority']
+
+        # 计算过期时长
+        now = datetime.now()
+        overdue_duration = now - due_date
+
+        if overdue_duration.days > 0:
+            time_str = f"{overdue_duration.days}天前"
+        elif overdue_duration.seconds >= 3600:
+            hours = overdue_duration.seconds // 3600
+            time_str = f"{hours}小时前"
+        else:
+            minutes = overdue_duration.seconds // 60
+            time_str = f"{minutes}分钟前"
+
+        # 构建通知消息
+        message = f"任务「{task_title}」已于{time_str}到期"
+
+        # 根据优先级设置提醒标题
+        if priority == 'high':
+            title = "⚠️ 高优先级任务到期提醒"
+        elif priority == 'medium':
+            title = "📋 任务到期提醒"
+        else:
+            title = "📝 任务到期提醒"
+        return title, message, priority
+
+    async def _show_notification(self, notification: Dict[str, Any], click_event: Any) -> None:
+        """显示系统通知"""
+        try:
+            title, message, priority = self._build_notification(notification)
+
+            from desktop_notifier.common import Button
+            from desktop_notifier import Urgency
+            await self.notifier.send(
+                title=title,
+                message=message,
+                urgency=Urgency.Critical if priority == 'high' else Urgency.Normal,
+                on_clicked=click_event,
+                timeout=0  # 0表示通知常驻
+            )
+        except Exception as e:
+            self.get_logger.error(f"显示通知时出错: {e}")
+
+    def reset_notified_tasks(self) -> None:
+        """重置已提醒任务列表(用于测试或重新提醒)"""
+        self.notified_tasks.clear()
+        self.get_logger.info("已重置已提醒任务列表")
+
+    def refresh_task_reminder(self, task_id: str, due_date: Optional[str] = None) -> None:
+        """刷新单个任务的到期提醒状态
+
+        当任务的截止时间被修改时调用：清除该任务已提醒的记录，并按新的截止时间
+        重新登记，确保任务在新的截止时间到期后仍能弹窗提醒。
+        """
+        if not task_id:
+            return
+
+        # 移除已提醒标记，使该任务可以在新的截止时间再次触发提醒
+        self.notified_tasks.discard(task_id)
+
+        if due_date:
+            try:
+                self.scheduled_tasks[task_id] = datetime.fromisoformat(due_date)
+            except (ValueError, TypeError):
+                self.scheduled_tasks.pop(task_id, None)
+        else:
+            # 截止时间被清空，不再需要提醒
+            self.scheduled_tasks.pop(task_id, None)
+
+        self.get_logger.info(f"任务 {task_id} 的截止时间已变更，到期提醒已刷新")
+    
+    def get_pending_tasks_count(self) -> int:
+        """获取待提醒的任务数量"""
+        return len(self.scheduled_tasks) - len(self.notified_tasks)
+
+
+# 全局提醒器实例
+_reminder: Optional[TaskReminder] = None
+
+def get_reminder() -> TaskReminder:
+    """获取提醒器单例"""
+    global _reminder
+    if _reminder is None:
+        _reminder = TaskReminder()
+    return _reminder
+
+def start_reminder(click_event: Any = None) -> TaskReminder:
+    """启动提醒服务"""
+    reminder = get_reminder()
+    reminder.start(click_event)
+    return reminder
+
+def refresh_reminder(task_id: str, due_date: Optional[str] = None) -> None:
+    """刷新指定任务的到期提醒（任务截止时间变更后调用）"""
+    get_reminder().refresh_task_reminder(task_id, due_date)
+
+def stop_reminder() -> None:
+    """停止提醒服务"""
+    reminder = get_reminder()
+    reminder.stop()

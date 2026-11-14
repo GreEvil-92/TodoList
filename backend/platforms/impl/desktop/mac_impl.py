@@ -1,0 +1,316 @@
+# impl/desktop/mac_impl.py
+
+import sys
+from pathlib import Path
+from typing import Any, Callable, Optional, Tuple
+
+from backend.platforms.impl.desktop.common.common_impl import DesktopCommonService
+
+class MacService(DesktopCommonService):
+    def _packaged_data_dir(self) -> Path:
+        """macOS 惯例：~/Library/Application Support/TodoList
+        .app bundle 内不应写数据（只读分发、签名校验），必须落用户目录。
+        """
+        from backend.utils.utils import ensure_dir
+        return ensure_dir(Path.home() / 'Library' / 'Application Support' / self.APP_NAME)
+
+    def _packaged_log_dir(self) -> Path:
+        """macOS 约定：~/Library/Logs/<App>"""
+        return Path.home() / 'Library' / 'Logs' / self.APP_NAME
+
+    def shortcut_handler(self, shortcut: str, handler: Callable[[], None]) -> Optional[Any]:
+        from quickmachotkey import quickHotKey, mask
+        from quickmachotkey.constants import (
+            kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E,
+            kVK_ANSI_F, kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J,
+            kVK_ANSI_K, kVK_ANSI_L, kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_O,
+            kVK_ANSI_P, kVK_ANSI_Q, kVK_ANSI_R, kVK_ANSI_S, kVK_ANSI_T,
+            kVK_ANSI_U, kVK_ANSI_V, kVK_ANSI_W, kVK_ANSI_X, kVK_ANSI_Y,
+            kVK_ANSI_Z,
+            kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5,
+            kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9, kVK_ANSI_0,
+            kVK_Space, kVK_Return, kVK_Tab, kVK_Escape, kVK_Delete, kVK_ForwardDelete,
+            kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow,
+            kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8,
+            kVK_F9, kVK_F10, kVK_F11, kVK_F12,
+            cmdKey, controlKey, optionKey, shiftKey
+        )
+
+        # ============ 1. 映射表定义 ============
+
+        # pynput 修饰符字符串 -> quickmachotkey 修饰符常量
+        MODIFIER_MAP = {
+            '<ctrl>': controlKey,
+            '<cmd>': cmdKey,
+            '<command>': cmdKey,
+            '<alt>': optionKey,
+            '<option>': optionKey,
+            '<shift>': shiftKey,
+        }
+
+        # pynput 特殊键名 -> quickmachotkey 虚拟键码
+        SPECIAL_KEY_MAP = {
+            '<space>': kVK_Space,
+            '<enter>': kVK_Return,
+            '<return>': kVK_Return,
+            '<tab>': kVK_Tab,
+            '<esc>': kVK_Escape,
+            '<escape>': kVK_Escape,
+            '<backspace>': kVK_Delete,
+            '<delete>': kVK_ForwardDelete,
+            '<up>': kVK_UpArrow,
+            '<down>': kVK_DownArrow,
+            '<left>': kVK_LeftArrow,
+            '<right>': kVK_RightArrow,
+            '<f1>': kVK_F1,
+            '<f2>': kVK_F2,
+            '<f3>': kVK_F3,
+            '<f4>': kVK_F4,
+            '<f5>': kVK_F5,
+            '<f6>': kVK_F6,
+            '<f7>': kVK_F7,
+            '<f8>': kVK_F8,
+            '<f9>': kVK_F9,
+            '<f10>': kVK_F10,
+            '<f11>': kVK_F11,
+            '<f12>': kVK_F12,
+        }
+
+        # 显式获取正确的子模块对象
+        constants_mod = sys.modules['quickmachotkey.constants']
+
+        LETTER_KEY_MAP = {
+            chr(ord('a') + i): getattr(constants_mod, f"kVK_ANSI_{chr(ord('A') + i)}")
+            for i in range(26)
+        }
+
+        DIGIT_KEY_MAP = {
+            str(i): getattr(constants_mod, f"kVK_ANSI_{i}")
+            for i in range(10)
+        }
+
+        def get_virtual_key_for_char(char: str) -> Optional[int]:
+            """根据单个字符返回对应的虚拟键码"""
+            if char in LETTER_KEY_MAP:
+                return LETTER_KEY_MAP[char]
+            if char in DIGIT_KEY_MAP:
+                return DIGIT_KEY_MAP[char]
+            return None
+
+        def parse_pynput_shortcut(shortcut_str: str) -> Tuple[int, int]:
+            """解析 pynput 风格的快捷键字符串，返回 (virtual_key, modifier_mask)"""
+            shortcut_str = shortcut_str.replace('meta', 'cmd').replace('win', 'cmd').replace('control', 'ctrl')
+            # 按 '+' 分割
+            parts = shortcut_str.lower().split('+')
+            if len(parts) < 1:
+                raise ValueError(f"无效的快捷键格式: {shortcut_str}")
+
+            modifiers = 0
+            virtual_key = None
+
+            for part in parts:
+                # 处理修饰符
+                if part in MODIFIER_MAP:
+                    modifiers |= MODIFIER_MAP[part]
+                # 处理特殊键
+                elif part in SPECIAL_KEY_MAP:
+                    if virtual_key is not None:
+                        raise ValueError(f"快捷键 '{shortcut_str}' 包含多个主键，最后一个为 '{part}'")
+                    virtual_key = SPECIAL_KEY_MAP[part]
+                # 处理字母或数字
+                elif len(part) == 1 and part.isalnum():
+                    if virtual_key is not None:
+                        raise ValueError(f"快捷键 '{shortcut_str}' 包含多个主键，最后一个为 '{part}'")
+                    vk = get_virtual_key_for_char(part)
+                    if vk is None:
+                        raise ValueError(f"不支持的按键: {part}")
+                    virtual_key = vk
+                else:
+                    raise ValueError(f"无法识别的键: {part}")
+
+            if virtual_key is None:
+                raise ValueError(f"快捷键 '{shortcut_str}' 中没有指定主键")
+
+            return virtual_key, mask(*([modifiers] if modifiers else []))
+
+        try:
+            # 使用装饰器语法生成快捷键绑定
+            virtual_key, modifier_mask = parse_pynput_shortcut(shortcut)
+
+            # 使用 quickHotKey 装饰器注册
+            @quickHotKey(virtualKey=virtual_key, modifierMask=modifier_mask)
+            def macos_shortcut_handler() -> None:
+                self.backend_logger().info("【快捷键触发】系统 RunLoop 捕获到 Option+Space，执行 UI 切换")
+                handler()
+
+            # 重要：保存注册引用，否则快捷键会在函数结束后失效
+            self.backend_logger().info("【主线程】macOS 全局快捷键注册成功，无后台常驻线程。")
+            return macos_shortcut_handler
+
+        except Exception as e:
+            self.backend_logger().error(f"快捷键注册失败: {e}")
+
+    def force_kill_process_tree(self, pid: int) -> None:
+        """强制结束当前进程及其所有子进程的统一接口"""
+        import subprocess
+        import time
+        # 优雅终止 (SIGTERM)
+        subprocess.run(['kill', '-TERM', str(pid)])
+        time.sleep(2)
+        # 强制终止 (SIGKILL)
+        subprocess.run(['kill', '-KILL', str(pid)])
+        # 强制终止所有子进程，使用 pgrep -P 查找并传递给 kill -9[reference:5]
+        subprocess.run(f'pgrep -P {pid} | xargs kill -9', shell=True)
+
+    def get_app_icon(self, base_path: Path) -> Path:
+        """获取应用图标的统一接口"""
+        return base_path / 'todo_icon.icns'
+
+    def start_prepare(self) -> None:
+        """应用启动前准备工作的统一接口"""
+        # 强制在主线程预热 TIS API，防止后台线程后续并发调用导致崩溃
+        import ctypes
+        import ctypes.util
+
+        try:
+            # 加载 Carbon 框架并调用一次获取当前输入源
+            carbon = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/Carbon.framework/Carbon')
+            carbon.TISCopyCurrentKeyboardInputSource()
+        except Exception:
+            pass
+
+        # 单实例保护：开机自启动（LaunchAgent）与系统"重新登录时恢复窗口"可能先后拉起两个
+        # 进程，这里让后启动的那个直接退出，避免双开抢同一个数据库
+        lock_dir = Path.home() / 'Library' / 'Application Support' / self.APP_NAME
+        if not self.acquire_single_instance_lock(lock_dir):
+            self.backend_logger().info("检测到已有实例正在运行，激活已有实例后退出本实例")
+            self.activate_existing_window()
+            sys.exit(0)
+
+    def _get_app_bundle_path(self) -> Optional[Path]:
+        """返回当前应用的 .app 包路径；非 .app 环境（如开发态）返回 None"""
+        if not getattr(sys, 'frozen', False):
+            return None
+        # .../<App>.app/Contents/MacOS/<App> —— 逐级上溯找到 .app 这一层
+        for parent in Path(sys.executable).parents:
+            if parent.suffix == '.app':
+                return parent
+        return None
+
+    def activate_existing_window(self) -> bool:
+        """激活已运行实例的统一接口"""
+        import subprocess
+
+        bundle_path = self._get_app_bundle_path()
+        if not bundle_path:
+            self.backend_logger().warning("无法定位 .app 包，跳过激活已有实例")
+            return False
+        try:
+            # open 走 LaunchServices：应用已在运行时只会激活它，不会再开一个新实例
+            subprocess.run(['open', '-a', str(bundle_path)], timeout=5)
+            return True
+        except Exception as e:
+            self.backend_logger().error(f"激活已有实例失败: {e}")
+            return False
+
+    def _enable_auto_start_impl(self) -> bool:
+        """macOS平台启用自启动"""
+        from backend.utils import utils
+        try:
+            # LaunchAgents目录
+            launch_agents_dir = Path.home() / 'Library' / 'LaunchAgents'
+            launch_agents_dir.mkdir(parents=True, exist_ok=True)
+
+            # plist文件路径
+            plist_file = launch_agents_dir / f"com.{self.APP_NAME.lower()}.plist"
+
+            # 日志目录
+            from backend.utils.utils import ensure_dir
+            log_dir = ensure_dir(self._packaged_log_dir())
+
+            # 打包后优先用 open 拉起 .app：走 LaunchServices 时应用若已在运行只会激活它，
+            # 不会重复开第二个进程；开发态则直接用解释器执行入口脚本
+            bundle_path = self._get_app_bundle_path()
+            if bundle_path:
+                program_arguments = (
+                    '    <string>/usr/bin/open</string>\n'
+                    '    <string>-a</string>\n'
+                    f'    <string>{bundle_path}</string>'
+                )
+                launch_target = str(bundle_path)
+            else:
+                app_path = utils.get_app_path(self)
+                program_arguments = (
+                    f'    <string>{sys.executable}</string>\n'
+                    f'    <string>{app_path}</string>'
+                )
+                launch_target = app_path
+
+            # 只保留 RunAtLoad：额外写 StartInterval 会让 launchd 周期性重复拉起本任务，
+            # 登录时就会出现两个实例
+            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>Label</key>
+<string>com.{self.APP_NAME.lower()}</string>
+<key>ProgramArguments</key>
+<array>
+{program_arguments}
+</array>
+<key>RunAtLoad</key>
+<true/>
+<key>KeepAlive</key>
+<false/>
+<key>LaunchOnlyOnce</key>
+<true/>
+<key>StandardOutPath</key>
+<string>{log_dir}/{self.APP_NAME}.out.log</string>
+<key>StandardErrorPath</key>
+<string>{log_dir}/{self.APP_NAME}.err.log</string>
+<key>EnvironmentVariables</key>
+<dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+</dict>
+<key>WorkingDirectory</key>
+<string>{Path.home()}</string>
+</dict>
+</plist>
+"""
+
+            with open(plist_file, 'w', encoding='utf-8') as f:
+                f.write(plist_content)
+
+            self.backend_logger().info(f"macOS开机自启动已启用: {plist_file} -> {launch_target}")
+            return True
+
+        except Exception as e:
+            self.backend_logger().error(f"macOS启用自启动失败: {e}")
+            return False
+
+    def _disable_auto_start_impl(self) -> bool:
+        """macOS平台禁用自启动"""
+        try:
+            # LaunchAgents目录
+            launch_agents_dir = Path.home() / 'Library' / 'LaunchAgents'
+            plist_file = launch_agents_dir / f"com.{self.APP_NAME.lower()}.plist"
+
+            if plist_file.exists():
+                # 删除plist文件
+                plist_file.unlink()
+
+            # 删除启动脚本
+            script_file = Path.home() / '.local' / 'bin' / f"{self.APP_NAME}_start.sh"
+            if script_file.exists():
+                script_file.unlink()
+
+            self.backend_logger().info("macOS开机自启动已禁用")
+            return True
+
+        except Exception as e:
+            self.backend_logger().error(f"macOS禁用自启动失败: {e}")
+            return False
+
+# 用于给工厂注册的导出变量
+ExportService = MacService

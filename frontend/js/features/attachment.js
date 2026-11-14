@@ -1,0 +1,470 @@
+// 任务附件管理模块
+// 负责：任务表单中的附件选择/展示/移除，任务详情中的附件展示与打开
+
+const ATTACHMENT_MAX_COUNT = 5;
+const ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
+class AttachmentManager {
+    constructor(todoManager) {
+        this.todo = todoManager;
+        // items: 已存在附件(含 id) 或 待新增附件(含 tempId)
+        this.items = [];
+        this._tempSeq = 0;
+        // 移动端（Android）没有本地文件选择/打开能力，表单里的附件区域整体只读
+        this.readonly = false;
+        this.cacheDomRefs();
+        this.bindEvents();
+    }
+
+    // 移动端：附件不可增删，只能提示到桌面端操作
+    isMobile() {
+        return typeof Utils.isMobilePlatform === 'function' ? Utils.isMobilePlatform() : false;
+    }
+
+    // 移动端拦截统一入口：返回 true 表示已提示，调用方直接放弃后续操作
+    blockOnMobile(messageKey, fallback) {
+        Utils.showToast(this.getText(messageKey, fallback), 'warning');
+        return true;
+    }
+
+    getText(key, fallback) {
+        return window.languageManager ? window.languageManager.getText(key, fallback) : fallback;
+    }
+
+    cacheDomRefs() {
+        this.listEl = document.getElementById('attachment-list');
+        this.countEl = document.getElementById('attachment-count');
+        this.mobileNoticeEl = document.getElementById('attachment-mobile-notice');
+        this.addFileBtn = document.getElementById('attachment-add-file-btn');
+        this.addLinkBtn = document.getElementById('attachment-add-link-btn');
+        this.addFolderBtn = document.getElementById('attachment-add-folder-btn');
+        // 在线链接弹窗
+        this.linkModal = document.getElementById('attachment-link-modal');
+        this.linkNameInput = document.getElementById('attachment-link-name');
+        this.linkUrlInput = document.getElementById('attachment-link-url');
+        this.linkSaveBtn = document.getElementById('attachment-link-save');
+        this.linkCancelBtn = document.getElementById('attachment-link-cancel');
+        this.linkCloseBtn = document.getElementById('attachment-link-close');
+    }
+
+    bindEvents() {
+        this.addFileBtn?.addEventListener('click', () => this.addFiles());
+        this.addLinkBtn?.addEventListener('click', () => this.openLinkModal());
+        this.addFolderBtn?.addEventListener('click', () => this.addFolder());
+        this.linkSaveBtn?.addEventListener('click', () => this.confirmAddLink());
+        this.linkCancelBtn?.addEventListener('click', () => this.closeLinkModal());
+        this.linkCloseBtn?.addEventListener('click', () => this.closeLinkModal());
+        // 表单附件移除（事件委托）
+        this.listEl?.addEventListener('click', (e) => {
+            const btn = e.target.closest('.attachment-remove');
+            if (btn) {
+                this.removeItem(btn.dataset.key);
+            }
+        });
+    }
+
+    // ==================== 表单（新建/编辑） ====================
+
+    reset() {
+        this.items = [];
+        this._tempSeq = 0;
+        // 移动端不支持附件操作：新建（含复制）一律只读
+        this.setReadonly(this.isMobile());
+    }
+
+    // 切换表单附件区域的只读态（移动端只读，桌面端可编辑）
+    setReadonly(readonly) {
+        this.readonly = !!readonly;
+        this.renderFormList();
+    }
+
+    loadFromTask(task) {
+        this.readonly = false;
+        this.items = (task && task.attachments ? task.attachments : []).map(att => ({
+            id: att.id,
+            type: att.type,
+            name: att.name,
+            url: att.url || '',
+            filePath: att.filePath || '',
+            size: att.size,
+            isImage: !!att.isImage
+        }));
+        this._tempSeq = 0;
+        this.renderFormList();
+    }
+
+    // 复制任务：把源任务的附件带进新建表单，但不复用源附件的 id。
+    // 保存时后端按 copyFrom 生成新记录，并复制一份实体文件，避免两个任务共用同一份附件
+    // （共用会导致删除其中一个任务时，另一个任务的附件被一并删掉）。
+    loadCopyFromTask(task) {
+        this.readonly = false;
+        this._tempSeq = 0;
+        this.items = (task && task.attachments ? task.attachments : []).map(att => ({
+            copyFrom: att.id,
+            tempId: `copy_${Date.now()}_${this._tempSeq++}`,
+            type: att.type,
+            name: att.name,
+            url: att.url || '',
+            filePath: att.filePath || '',
+            // 文件夹存的是绝对路径，复制时需要按 path 原样提交
+            path: att.filePath || '',
+            size: att.size,
+            isImage: !!att.isImage
+        }));
+        this.renderFormList();
+    }
+
+    removeItem(key) {
+        if (this.readonly && this.blockOnMobile('mobileAttachmentUnsupported', '移动端不支持操作附件，如需配置附件请在桌面端操作')) return;
+        this.items = this.items.filter(item => this._itemKey(item) !== key);
+        this.renderFormList();
+    }
+
+    async addFiles() {
+        if (this.readonly && this.blockOnMobile('mobileAttachmentUnsupported', '移动端不支持操作附件，如需配置附件请在桌面端操作')) return;
+        if (this.items.length >= ATTACHMENT_MAX_COUNT) {
+            Utils.showToast(this.getText('attachmentMaxReached', '最多只能添加 {count} 个附件').replace('{count}', ATTACHMENT_MAX_COUNT), 'warning');
+            return;
+        }
+
+        await Utils.apiCall({
+            apiMethod: 'select_attachment_files',
+            onSuccess: (response) => {
+                const files = response.data || [];
+                let skippedBySize = 0;
+                for (const file of files) {
+                    if (this.items.length >= ATTACHMENT_MAX_COUNT) break;
+                    if (file.size && file.size > ATTACHMENT_MAX_SIZE) {
+                        skippedBySize++;
+                        continue;
+                    }
+                    this.items.push({
+                        tempId: `new_${Date.now()}_${this._tempSeq++}`,
+                        type: 'file',
+                        name: file.name,
+                        sourcePath: file.path,
+                        size: file.size,
+                        isImage: !!file.isImage
+                    });
+                }
+                if (skippedBySize > 0) {
+                    Utils.showToast(this.getText('attachmentTooLarge', '单个附件不能超过 10MB，已忽略 {count} 个文件').replace('{count}', skippedBySize), 'warning');
+                }
+                this.renderFormList();
+            },
+            onError: (error) => {
+                // 用户取消选择属于正常操作，不提示错误；其余失败要让用户知道
+                if (error?.code === 'CANCELLED') return;
+                Utils.showToast(this.getText('attachmentSelectFailed', '选择附件失败'), 'error');
+            }
+        });
+    }
+
+    async addFolder() {
+        if (this.readonly && this.blockOnMobile('mobileAttachmentUnsupported', '移动端不支持操作附件，如需配置附件请在桌面端操作')) return;
+        if (this.items.length >= ATTACHMENT_MAX_COUNT) {
+            Utils.showToast(this.getText('attachmentMaxReached', '最多只能添加 {count} 个附件').replace('{count}', ATTACHMENT_MAX_COUNT), 'warning');
+            return;
+        }
+
+        await Utils.apiCall({
+            apiMethod: 'select_attachment_folder',
+            onSuccess: (response) => {
+                const data = response.data || {};
+                if (data.supported === false) {
+                    Utils.showToast(this.getText('folderAddUnsupportedOnMobile', '移动端不支持关联文件夹'), 'warning');
+                    return;
+                }
+                const folderPath = data.path;
+                if (!folderPath) return;
+                this.items.push({
+                    tempId: `new_${Date.now()}_${this._tempSeq++}`,
+                    type: 'folder',
+                    name: data.name || folderPath,
+                    path: folderPath
+                });
+                this.renderFormList();
+            },
+            onError: (error) => {
+                // 用户取消选择属于正常操作，不提示错误；其余失败要让用户知道
+                if (error?.code === 'CANCELLED') return;
+                Utils.showToast(this.getText('attachmentSelectFailed', '选择附件失败'), 'error');
+            }
+        });
+    }
+
+    openLinkModal() {
+        if (this.readonly && this.blockOnMobile('mobileAttachmentUnsupported', '移动端不支持操作附件，如需配置附件请在桌面端操作')) return;
+        if (this.items.length >= ATTACHMENT_MAX_COUNT) {
+            Utils.showToast(this.getText('attachmentMaxReached', '最多只能添加 {count} 个附件').replace('{count}', ATTACHMENT_MAX_COUNT), 'warning');
+            return;
+        }
+        if (this.linkNameInput) this.linkNameInput.value = '';
+        if (this.linkUrlInput) this.linkUrlInput.value = '';
+        Utils.ModalManager.show('attachment-link-modal');
+        setTimeout(() => this.linkUrlInput?.focus(), 150);
+    }
+
+    closeLinkModal() {
+        Utils.ModalManager.hide('attachment-link-modal');
+    }
+
+    confirmAddLink() {
+        const url = (this.linkUrlInput?.value || '').trim();
+        const name = (this.linkNameInput?.value || '').trim();
+        if (!url) {
+            Utils.showToast(this.getText('attachmentLinkRequired', '请输入链接地址'), 'warning');
+            return;
+        }
+        if (!Utils.isValidUrl(url)) {
+            Utils.showToast(this.getText('attachmentLinkInvalid', '链接地址格式不正确'), 'warning');
+            return;
+        }
+        this.items.push({
+            tempId: `new_${Date.now()}_${this._tempSeq++}`,
+            type: 'link',
+            name: name || url,
+            url: url
+        });
+        this.closeLinkModal();
+        this.renderFormList();
+    }
+
+    renderFormList() {
+        if (!this.listEl) return;
+
+        if (this.items.length === 0) {
+            this.listEl.innerHTML = `<div class="attachment-empty">${this.getText('attachmentEmpty', '暂无附件')}</div>`;
+        } else {
+            // 移动端只读：不渲染删除按钮，只展示已有的附件信息
+            const removeBtn = item => this.readonly ? '' : `
+                        <button type="button" class="attachment-remove" data-key="${this._itemKey(item)}" title="${this.getText('delete', '删除')}">&times;</button>`;
+            this.listEl.innerHTML = this.items.map(item => {
+                const icon = this._itemIcon(item);
+                const sizeText = item.type === 'file' && item.size
+                    ? ` <span class="attachment-size">${this.formatSize(item.size)}</span>` : '';
+                return `
+                    <div class="attachment-item">
+                        <span class="attachment-item-icon">${icon}</span>
+                        <span class="attachment-item-name" title="${Utils.escapeHtml(item.name)}">${Utils.escapeHtml(item.name)}</span>
+                        ${sizeText}${removeBtn(item)}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        if (this.countEl) {
+            this.countEl.textContent = `${this.items.length}/${ATTACHMENT_MAX_COUNT}`;
+        }
+        // 移动端只读时所有操作按钮一并禁用，避免给用户可点的错觉
+        const disabled = this.readonly || this.items.length >= ATTACHMENT_MAX_COUNT;
+        if (this.addFileBtn) this.addFileBtn.disabled = disabled;
+        if (this.addLinkBtn) this.addLinkBtn.disabled = disabled;
+        if (this.addFolderBtn) this.addFolderBtn.disabled = disabled;
+        if (this.mobileNoticeEl) {
+            this.mobileNoticeEl.style.display = this.readonly ? 'block' : 'none';
+        }
+    }
+
+    getAttachments() {
+        // 移动端只读态下不提交任何附件，避免保存出无法在移动端管理的任务
+        if (this.readonly) return [];
+        return this.items.map(item => {
+            if (item.id) {
+                return {
+                    id: item.id,
+                    type: item.type,
+                    name: item.name,
+                    url: item.url || null
+                };
+            }
+            // 复制任务带来的附件：后端按 copyFrom 生成新记录，并自行复制实体文件
+            if (item.copyFrom) {
+                const payload = { copyFrom: item.copyFrom, type: item.type, name: item.name };
+                if (item.type === 'link') payload.url = item.url || '';
+                if (item.type === 'folder') payload.path = item.path || item.filePath || '';
+                return payload;
+            }
+            if (item.type === 'link') {
+                return { type: 'link', name: item.name, url: item.url };
+            }
+            if (item.type === 'folder') {
+                return { type: 'folder', name: item.name, path: item.path };
+            }
+            return {
+                type: 'file',
+                name: item.name,
+                sourcePath: item.sourcePath,
+                size: item.size
+            };
+        });
+    }
+
+    _itemKey(item) {
+        return item.id || item.tempId;
+    }
+
+    _itemIcon(item) {
+        if (item.type === 'link') return '🔗';
+        if (item.type === 'folder') return '📁';
+        return item.isImage ? '🖼️' : '📎';
+    }
+
+    formatSize(size) {
+        if (!size && size !== 0) return '';
+        if (size < 1024) return `${size} B`;
+        if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+        return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    // ==================== 任务详情 ====================
+
+    buildDetailHtml(task) {
+        const attachments = task && task.attachments ? task.attachments : [];
+        // 移动端没有打开本地文件/文件夹的能力：只展示附件信息，不渲染可点击的链接
+        const viewOnly = this.isMobile();
+        let inner;
+        if (attachments.length === 0) {
+            inner = `<span style="color: var(--text-secondary);">${this.getText('noTaskAttachments', '无附件')}</span>`;
+        } else {
+            inner = attachments.map(att => {
+                const sizeText = att.type === 'file' && att.size
+                    ? ` <span class="attachment-size">(${this.formatSize(att.size)})</span>` : '';
+                const icon = `<span class="attachment-item-icon">${this._itemIcon(att)}</span>`;
+                const name = `<span class="detail-attachment-name">${Utils.escapeHtml(att.name)}</span>${sizeText}`;
+                if (viewOnly) {
+                    return `
+                    <div class="detail-attachment-item">${icon}${name}</div>
+                `;
+                }
+                return `
+                    <a href="javascript:void(0)" class="detail-attachment-link" data-attachment-id="${att.id}">
+                        ${icon}${name}
+                    </a>
+                `;
+            }).join('');
+        }
+
+        return `
+            <div style="grid-column: 1 / -1;">
+                <strong style="display: block; color: var(--text-secondary); margin-bottom: 8px; font-size: 14px;">
+                    ${this.getText('taskAttachments', '附件')} (${attachments.length})
+                </strong>
+                <div class="detail-attachment-list">${inner}</div>
+            </div>
+        `;
+    }
+
+    bindDetailEvents(task) {
+        // 移动端详情里的附件只展示信息，不绑定打开行为
+        if (this.isMobile()) return;
+        const attachments = task && task.attachments ? task.attachments : [];
+        document.querySelectorAll('.detail-attachment-link[data-attachment-id]').forEach(el => {
+            el.onclick = () => {
+                const att = attachments.find(a => a.id === el.dataset.attachmentId);
+                if (att) this.openAttachment(att);
+            };
+        });
+    }
+
+    openAttachment(att) {
+        // 统一兜底：移动端一律不允许打开附件（详情页与列表入口共用此入口）
+        if (this.isMobile() && this.blockOnMobile('mobileAttachmentViewOnly', '移动端不支持打开附件，请在桌面端查看')) return;
+        if (att.type === 'link') {
+            this.openExternal(att);
+            return;
+        }
+        if (att.type === 'folder') {
+            this.openFolder(att);
+            return;
+        }
+        // 由后端统一判断访问模式：
+        // - local：桌面端且未开启同步，直接打开本地文件
+        // - remote：移动端或已开启同步，拼接云端地址下载
+        Utils.apiCall({
+            apiMethod: 'get_attachment_access_mode',
+            onSuccess: (response) => {
+                const mode = (response.data && response.data.mode) || 'local';
+                if (mode === 'remote') {
+                    this.openViaDownloadUrl(att);
+                } else {
+                    this.openLocalFile(att);
+                }
+            },
+            onError: () => this.openLocalFile(att)
+        });
+    }
+
+    openExternal(att) {
+        Utils.apiCall({
+            apiMethod: 'open_attachment',
+            apiArgs: [att.id],
+            onError: () => {
+                if (att.url) {
+                    window.open(att.url, '_blank');
+                } else {
+                    Utils.showToast(this.getText('attachmentOpenFailed', '打开附件失败'), 'error');
+                }
+            }
+        });
+    }
+
+    // 关联的文件夹：桌面端直接打开，移动端提示不支持
+    openFolder(att) {
+        Utils.apiCall({
+            apiMethod: 'get_attachment_access_mode',
+            onSuccess: (response) => {
+                const data = response.data || {};
+                if (data.is_mobile) {
+                    Utils.showToast(this.getText('folderOpenUnsupportedOnMobile', '移动端不支持打开任务关联的文件夹'), 'warning');
+                    return;
+                }
+                this.openFolderLocal(att);
+            },
+            onError: () => this.openFolderLocal(att)
+        });
+    }
+
+    openFolderLocal(att) {
+        Utils.apiCall({
+            apiMethod: 'open_attachment',
+            apiArgs: [att.id],
+            onError: () => Utils.showToast(this.getText('folderOpenFailed', '打开文件夹失败，文件夹可能已被移动或删除'), 'error')
+        });
+    }
+
+    // 本地模式：使用系统默认程序打开；失败时提示并打开文件所在目录
+    openLocalFile(att) {
+        Utils.apiCall({
+            apiMethod: 'open_attachment',
+            apiArgs: [att.id],
+            onError: () => {
+                Utils.showToast(this.getText('attachmentOpenFallback', '无法直接打开附件，已为你打开文件所在目录，请手动打开'), 'warning');
+                Utils.apiCall({
+                    apiMethod: 'reveal_attachment',
+                    apiArgs: [att.id],
+                    onError: () => Utils.showToast(this.getText('attachmentRevealFailed', '无法打开文件所在目录'), 'error')
+                });
+            }
+        });
+    }
+
+    // 云模式：拼接云端（WebDAV）地址，点击后下载，由用户自行打开
+    openViaDownloadUrl(att) {
+        Utils.apiCall({
+            apiMethod: 'get_attachment_download_url',
+            apiArgs: [att.id],
+            onSuccess: (response) => {
+                const url = response.data && response.data.url;
+                if (url) {
+                    window.open(url, '_blank');
+                } else {
+                    Utils.showToast(this.getText('attachmentOpenFailed', '打开附件失败'), 'error');
+                }
+            },
+            onError: () => Utils.showToast(this.getText('attachmentOpenFailed', '打开附件失败'), 'error')
+        });
+    }
+}
+
+window.AttachmentManager = AttachmentManager;

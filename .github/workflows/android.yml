@@ -1,0 +1,91 @@
+name: Build Android APK
+
+# 云端构建安卓 APK：不需要本地 Linux / JDK / Android SDK
+# 用法：把项目推到 GitHub → 仓库顶部 Actions → 左侧 "Build Android APK"
+#      → 右侧 "Run workflow" → 等 40~70 分钟 → 在该次运行页面底部 Artifacts 下载 todolist-apk
+# 详细图文步骤见仓库根目录：安卓打包详细步骤.md
+
+on:
+  # 手动触发（新手只需要用这个）
+  workflow_dispatch:
+  # 改动到运行时代码时自动构建。注释掉下面几行可省免费额度。
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/config/**'
+      - 'main.py'
+      - 'requirements.txt'
+      - '.github/workflows/android.yml'
+
+jobs:
+  build:
+    # 固定在 22.04：24.04 的系统工具链太新，p4a v2024.01.21 与之搭配更容易编译失败
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk autoconf automake libtool pkg-config \
+            zlib1g-dev libncurses-dev libtinfo6 cmake libffi-dev libssl-dev
+          python -m pip install --upgrade pip setuptools wheel
+          # p4a v2024.01.21 需要 Cython 0.29.x，装 3.x 会编译报错
+          pip install "buildozer>=1.5.0" "cython==0.29.36"
+
+      - name: 缓存 SDK / NDK / p4a
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            .buildozer
+          key: buildozer-${{ hashFiles('scripts/config/buildozer.spec') }}
+          restore-keys: |
+            buildozer-
+
+      - name: 同步构建配置到项目根目录
+        run: |
+          cp -f scripts/config/buildozer.spec ./buildozer.spec
+          # 云端 runner 在境外，清华镜像反而更慢，这里关掉改用官方 PyPI
+          sed -i 's|^pip_index_url.*|#&|; s|^pypi_mirror.*|#&|' ./buildozer.spec
+
+      - name: 配置自检
+        run: python scripts/check_android_config.py
+
+      - name: 构建 debug APK
+        run: |
+          set -o pipefail   # 不加这句，tee 会吞掉 buildozer 的失败退出码
+          buildozer -v android debug 2>&1 | tee buildozer-build.log
+
+      - name: 显示产物信息
+        run: ls -lh bin/*.apk || true
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: todolist-apk
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 构建失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-log
+          path: |
+            buildozer-build.log
+            .buildozer/**/build.log
+          if-no-files-found: ignore
+          retention-days: 7

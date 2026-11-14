@@ -1,0 +1,136 @@
+# impl/desktop/linux_impl.py
+import os
+import sys
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from backend.platforms.impl.desktop.common.common_impl import DesktopCommonService
+
+class LinuxService(DesktopCommonService):
+    def _packaged_data_dir(self) -> Path:
+        """打包后数据落 ~/.todolist
+
+        AppImage 挂载点只读；沿用历史目录名，避免旧版本数据迁移时找不到。
+        """
+        from backend.utils.utils import ensure_dir
+        return ensure_dir(Path.home() / '.todolist')
+
+    def _packaged_log_dir(self) -> Path:
+        """打包后日志同样落用户目录：AppImage 挂载点只读"""
+        return self._packaged_data_dir() / 'logs'
+
+    def shortcut_handler(self, shortcut: str, handler: Callable[[], None]) -> Optional[Any]:
+        try:
+            import backend.globals
+            from pynput import keyboard
+            listener = keyboard.GlobalHotKeys({shortcut: handler})
+            listener.start()
+            self.backend_logger().info(f"【系统日志】快捷键监听成功挂载！当前在 Mac 下的标准热键为: {shortcut}")
+            return None
+        except Exception as e:
+            self.backend_logger().error(f"【系统日志】快捷键挂载失败: {e}")
+
+    def force_kill_process_tree(self, pid: int) -> None:
+        """强制结束当前进程及其所有子进程的统一接口"""
+        # Linux环境利用时延让 GTK 将 DBus 信号安全发出，然后强制杀死所有关联进程
+        import gi
+        from gi.repository import Gtk
+        import time
+        gi.require_version('Gtk', '3.0')
+        for _ in range(10):
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            time.sleep(0.02)
+
+    def get_app_icon(self, base_path: Path) -> Path:
+        """获取应用图标的统一接口"""
+        return base_path / 'todo_icon.png'
+
+    def is_default_hide(self) -> bool:
+        """获取是否隐藏快捷键窗口的统一接口"""
+        # 隐藏将导致快捷键窗口在Linux环境无法使用
+        return False
+
+    def icon_exit(self) -> None:
+        """图标注销消息的统一接口"""
+        # 给 Ubuntu 24.04 底层 DBus 通信留出 200 毫秒处理图标注销消息
+        import time
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk
+
+        for _ in range(10):
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            time.sleep(0.02)
+
+    def start_prepare(self) -> None:
+        """应用启动前准备工作的统一接口"""
+        # 【针对 Ubuntu 24.04 虚拟机的环境变量优化】
+        # 必须在导入任何 GUI/Webview 组件前设置，消除无障碍总线和沙盒卡顿
+        os.environ["NO_AT_BRIDGE"] = "1"
+
+        # 单实例保护：自启动 .desktop 与用户手动启动叠加时只保留一个实例
+        lock_dir = Path.home() / '.local' / 'share' / self.APP_NAME
+        if not self.acquire_single_instance_lock(lock_dir):
+            self.backend_logger().info("检测到已有实例正在运行，退出本实例")
+            sys.exit(0)
+
+    def _enable_auto_start_impl(self) -> bool:
+        """Linux平台启用自启动"""
+        from backend.utils import utils
+        try:
+            # 使用传统的 autostart 方式
+            # 获取autostart目录
+            autostart_dir = Path.home() / '.config' / 'autostart'
+            autostart_dir.mkdir(parents=True, exist_ok=True)
+
+            # 创建.desktop文件
+            desktop_file = autostart_dir / f"{self.APP_NAME}.desktop"
+
+            # 启动命令
+            launch_cmd = utils.get_launch_command(self)
+
+            # 桌面文件内容
+            desktop_content = f"""[Desktop Entry]
+    Type=Application
+    Name={self.APP_NAME}
+    Exec={launch_cmd}
+    Hidden=false
+    NoDisplay=false
+    X-GNOME-Autostart-enabled=true
+    Comment=TodoList应用
+    """
+
+            with open(desktop_file, 'w', encoding='utf-8') as f:
+                f.write(desktop_content)
+
+            # 设置可执行权限
+            desktop_file.chmod(0o755)
+
+            self.backend_logger().info(f"Linux开机自启动已启用: {desktop_file}")
+            return True
+
+        except Exception as e:
+            self.backend_logger().error(f"Linux启用自启动失败: {e}")
+            return False
+
+    def _disable_auto_start_impl(self) -> bool:
+        """Linux平台禁用自启动"""
+        try:
+            # 删除.desktop文件
+            autostart_dir = Path.home() / '.config' / 'autostart'
+            desktop_file = autostart_dir / f"{self.APP_NAME}.desktop"
+
+            if desktop_file.exists():
+                desktop_file.unlink()
+
+            self.backend_logger().info("Linux开机自启动已禁用")
+            return True
+
+        except Exception as e:
+            self.backend_logger().error(f"Linux禁用自启动失败: {e}")
+            return False
+
+# 用于给工厂注册的导出变量
+ExportService = LinuxService

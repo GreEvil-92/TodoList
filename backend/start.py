@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""
+Todo List 桌面应用主程序
+使用 PyWebView 创建桌面应用窗口
+"""
+
+import os
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+import webview
+
+# 获取当前目录
+current_dir = Path(__file__).parent
+
+# 设置默认窗口置顶为false
+window_on_top = False
+
+from backend.platforms.core.factory import get_platform_service, is_mobile_platform
+service = get_platform_service()
+backend_logger = service.backend_logger()
+
+def get_resource_path(relative_path: str) -> str:
+    """获取资源文件的绝对路径，支持打包后的可执行文件"""
+    # 资源根目录由平台决定：打包后指向 _MEIPASS，开发态指向项目根
+    base_path = service.get_code_dir()
+
+    # 如果是前端文件，需要特殊处理
+    if relative_path.startswith('frontend/'):
+        resource_path = os.path.join(base_path, relative_path)
+        if not os.path.exists(resource_path):
+            # 如果在打包目录中找不到，尝试在源码目录结构中查找
+            resource_path = os.path.join(current_dir.parent, relative_path)
+    else:
+        resource_path = os.path.join(base_path, relative_path)
+    
+    return resource_path
+
+# 定义本地化字符串字典
+chinese_localization = {
+    'global.quitConfirmation': '温馨提示：\n关闭后，程序将最小化到系统托盘以保持消息后台提醒。\n如需彻底关闭，请在托盘右键退出~',
+    'global.ok': '确定',
+    'global.cancel': '取消'
+}
+
+def show_error_page(window: Any, message: str) -> None:
+    """启动失败时的兜底页面
+
+    初始化线程一旦中断，窗口会永远停在加载动画上，用户只能看到「正在加载中」却
+    无从得知原因。这里把失败原因直接渲染出来，便于现场排查。
+    """
+    escaped = (message or '未知错误').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    error_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ background-color: #f5f5f5; display: flex; justify-content: center; align-items: center;
+                   height: 100vh; font-family: sans-serif; color: #333; margin: 0; padding: 24px; }}
+            .container {{ max-width: 90%; text-align: left; background: #fff; border-radius: 8px;
+                         padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.08); word-break: break-all; }}
+            h3 {{ margin: 0 0 12px; color: #d9534f; }}
+            p {{ margin: 0; line-height: 1.6; font-size: 14px; color: #666; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h3>应用启动失败</h3>
+            <p>{escaped}</p>
+        </div>
+    </body>
+    </html>
+    """
+    try:
+        window.load_html(error_html)
+    except Exception as e:
+        backend_logger.error(f"展示错误页面失败: {e}")
+
+
+def start_app(start_keyboard: Optional[Callable[[], None]] = None) -> None:
+    """启动TodoList应用"""
+
+    def on_closing() -> bool:
+        """窗口关闭点击事件：仅首次关闭弹窗提醒"""
+        from backend.database.todo_database import TodoDatabase
+        settings_db = TodoDatabase()
+        confirm_close = settings_db.get_setting('confirm_close', True)
+        if is_mobile_platform():
+            backend.globals.window.confirm_close = False
+        elif confirm_close:
+            backend.globals.window.confirm_close = True
+            settings_db.set_setting('confirm_close', False)
+        else:
+            backend.globals.window.confirm_close = False
+        backend.globals.window.hide()
+        return False  # 阻止窗口被销毁，从而实现控制窗口显示和隐藏，而非开启和关闭
+
+    backend_logger.info("=" * 60)
+    backend_logger.info("TodoList 应用启动")
+    backend_logger.info("=" * 60)
+
+    # 创建一个极简的加载中 HTML 字符串，让窗口瞬间显示，避免白屏
+    loading_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body { background-color: #f5f5f5; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; color: #666; margin: 0; }
+            .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            .container { text-align: center; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="loader"></div>
+            <div>应用正在加载中，请稍候...</div>
+        </div>
+    </body>
+    </html>
+    """
+
+    # 创建窗口：首先加载内存中的 loading 页面（零磁盘 I/O，瞬间弹出）
+    backend_logger.info("创建应用窗口并展示加载动画...")
+
+    import backend.globals
+    backend.globals.window = webview.create_window(
+        'TodoList',
+        html=loading_html,  # 【关键】改用 html= 启动，不传递文件路径
+        js_api=None,  # 此时先不绑定 API，等全加载完后再载入
+        # 窗口位置和尺寸由平台层决定：桌面端居中占屏 80%，移动端不传任何几何参数
+        **service.get_window_geometry(),
+        text_select=True,
+        resizable=True
+    )
+
+    backend.globals.window.events.closing += on_closing
+
+    # 将后端耗时初始化逻辑，放到初始化回调中异步执行
+    def lazy_initialize(window: Any) -> None:
+        backend_logger.info("异步后台：开始加载后端模块与初始化...")
+
+        # 初始化失败也要继续：窗口必须离开加载页，否则用户永远停在「正在加载中」
+        api = None
+        sync_manager = None
+        try:
+            # 在子线程中延时或直接导入耗时模块
+            from backend.api.todo_api import TodoApi
+            from backend.features.webdav.webdav_data_sync import get_data_sync_manager
+
+            # 创建API实例
+            sync_manager = get_data_sync_manager()
+            backend_logger.info("初始化TodoApi")
+            api = TodoApi(sync_manager)
+            backend_logger.info(f"数据库路径: {api.db.db_path}")
+            backend_logger.info("TodoApi 实例创建成功")
+        except Exception as e:
+            backend_logger.error(f"后端初始化失败，将以降级模式继续启动: {e}", exc_info=True)
+
+        # 设置同步回调，当云端数据更新时刷新前端
+        def on_sync_complete() -> None:
+            try:
+                if backend.globals.window:
+                    js_str = """
+                        // 重新加载任务列表
+                        if (window.todoManager) { window.todoManager.loadTasks(); }
+                        if (window.categoryManager) { window.categoryManager.loadCategories(); window.categoryManager.renderCategories(false); }
+                        """
+                    backend.globals.window.evaluate_js(js_str)
+                    backend_logger.info("前端页面已刷新以反映云端数据变化")
+            except Exception as e:
+                backend_logger.error(f"同步回调执行失败: {e}")
+
+        if api is not None and sync_manager is not None:
+            # 保存全局变量，以便在 finally 中能够正常关闭；
+            # 不与启动动作绑在同一个 try，避免启动失败时跳过退出收尾
+            window.user_data = {'sync_manager': sync_manager}
+            try:
+                sync_manager.set_sync_callback(on_sync_complete)
+                # 启动自动同步
+                sync_manager.start_auto_sync()
+            except Exception as e:
+                backend_logger.error(f"启动自动同步失败，已跳过: {e}", exc_info=True)
+
+        # 无论初始化是否成功，都要把窗口切到真正的业务页面
+        try:
+            frontend_path = get_resource_path('frontend/index.html')
+            backend_logger.info(f"前端文件路径: {frontend_path}")
+            window.set_title('TodoList')
+            window.load_url(frontend_path)
+        except Exception as e:
+            backend_logger.error(f"加载前端页面失败: {e}", exc_info=True)
+            show_error_page(window, f"前端页面加载失败：{e}")
+            return
+
+        if api is None:
+            backend_logger.error("API 未初始化，跳过 API 绑定")
+            return
+
+        # 动态绑定之前延迟初始化的后台 API
+        try:
+            from backend.utils import utils
+            window._js_api = api
+            window.on_top = utils.str_to_bool(api.db.get_setting('window_on_top', False))
+        except Exception as e:
+            backend_logger.error(f"绑定后台 API 失败: {e}", exc_info=True)
+
+        # 快捷键功能(仅在桌面端启用)
+        enabled = api.db.get_setting('shortcut_enabled', True)
+        if not enabled:
+            backend_logger.info("快捷操作功能已关闭，跳过快捷键注册")
+        elif start_keyboard is None:
+            backend_logger.info("当前平台未提供快捷键注册入口，跳过")
+        else:
+            try:
+                start_keyboard()
+            except Exception as e:
+                backend_logger.error(f"注册快捷键失败: {e}", exc_info=True)
+
+    backend_logger.info("启动webview...")
+    try:
+        # 将 lazy_initialize 函数作为第一个参数传入
+        # pywebview 启动窗口后会立即在后台启动一个线程执行此函数，解决Linux端窗口卡死问题
+        webview.start(lazy_initialize, backend.globals.window,
+                      private_mode=False, debug=False, localization=chinese_localization)
+    finally:
+        # 窗口关闭后的收尾：先停定时器再执行退出上传，
+        # 否则 15s 轮询可能恰好在退出上传期间触发，is_syncing 冲突会让上传直接失败
+        backend_logger.info("正在停止后台服务...")
+        try:
+            if hasattr(backend.globals.window, 'user_data') and 'sync_manager' in backend.globals.window.user_data:
+                backend.globals.window.user_data['sync_manager'].stop_auto_sync()
+        except Exception as e:
+            backend_logger.error(f"停止自动同步服务失败: {e}")
+        try:
+            if hasattr(backend.globals.window, 'user_data') and 'sync_manager' in backend.globals.window.user_data:
+                backend.globals.window.user_data['sync_manager'].upload_on_exit()
+        except Exception as e:
+            backend_logger.error(f"退出前上传失败: {e}")
+        backend_logger.info("TodoList 应用已关闭")
+        backend_logger.info("=" * 60)
