@@ -39,6 +39,8 @@ Thumbs.db
 # Data
 data/*.db
 *.db
+# 运行期数据目录（todo.db + attachment 附件）
+todolist/
 
 # Logs
 *.log
