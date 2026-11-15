@@ -1495,11 +1495,9 @@ input:checked + .slider:before {
     min-height: 0;
 }
 
-/* 月份切换按钮：悬浮固定在日历视图顶部两角，与星期表头（日～六）同一行居中 */
+/* 月份切换按钮：嵌在星期表头行两端（九列网格的首尾），随表头自动垂直居中 */
 .calendar-prev-month, .calendar-next-month {
-    position: absolute;
-    top: calc(var(--spacing-sm) + 3px);  /* 与 .calendar-weekdays 表头行垂直居中 */
-    z-index: 2;                          /* 盖过月份水印层（z-index: 1），点击不被遮挡 */
+    flex-shrink: 0;
     width: 32px;
     height: 32px;
     display: flex;
@@ -1513,15 +1511,6 @@ input:checked + .slider:before {
     cursor: pointer;
     user-select: none;
     transition: var(--transition-fast);
-}
-
-/* 左上角：上个月；右上角：下个月 */
-.calendar-prev-month {
-    left: var(--spacing-sm);
-}
-
-.calendar-next-month {
-    right: var(--spacing-sm);
 }
 
 .calendar-prev-month:hover, .calendar-next-month:hover {
@@ -1583,12 +1572,17 @@ input:checked + .slider:before {
 
 .calendar-weekdays {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: var(--spacing-sm);
+    /* 首尾两列留给月份切换按钮，中间 7 列为星期表头 */
+    grid-template-columns: auto repeat(7, 1fr) auto;
+    align-items: center;       /* 按钮（圆形）与星期文字在行内垂直居中 */
+    column-gap: var(--spacing-sm);
     margin: var(--spacing-sm) 0;
     padding: var(--spacing-sm);
     background-color: var(--bg-secondary);
     border-radius: var(--border-radius);
+    position: sticky;          /* 内容超高滚动时表头（连同切换按钮）保持可见 */
+    top: 0;
+    z-index: 2;
 }
 
 .calendar-weekday {
