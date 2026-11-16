@@ -28,6 +28,11 @@ class SystemTrayManager(LogManager):
         # 隐藏并停止托盘
         try:
             self.service.start_desktop_task_reminder(False)
+            # 「关闭软件时上传」的收尾必须在这里同步完成：
+            # 后面的 taskkill /F 会强杀整个进程树，start.py 里 webview.start
+            # 之后的 finally 收尾（含退出上传）根本来不及执行，历史上导致
+            # 「仅关闭软件时上传」从托盘退出时永远不生效
+            self._run_exit_upload()
             if backend.globals.window:
                 backend.globals.window.destroy()
             icon.visible = False
@@ -41,6 +46,19 @@ class SystemTrayManager(LogManager):
             os._exit(0)
         except Exception as e:
             self.get_logger.error(f"icon stop error: {e}")
+
+    def _run_exit_upload(self) -> None:
+        """托盘退出前的收尾上传；失败只记日志，不阻塞退出流程"""
+        try:
+            window = backend.globals.window
+            sync_manager = getattr(window, 'user_data', {}).get('sync_manager') if window else None
+            if sync_manager is None:
+                self.get_logger.info("同步管理器未初始化，跳过退出前上传")
+                return
+            sync_manager.stop_auto_sync()
+            sync_manager.upload_on_exit()
+        except Exception as e:
+            self.get_logger.error(f"托盘退出上传失败: {e}")
 
     def start_app(self) -> None:
         try:

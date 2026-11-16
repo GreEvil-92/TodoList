@@ -5,6 +5,7 @@
 
 import os
 import threading
+import time
 from typing import Any, Callable, Dict, Optional, Tuple
 from datetime import datetime
 from backend.features.webdav.webdav_config import get_webdav_config, is_webdav_enabled, set_webdav_config
@@ -37,6 +38,9 @@ class DataSyncManager(LogManager):
         self.is_syncing = False
         self.last_sync_time: Optional[datetime] = None
         self.on_sync_callback: Optional[Callable[[], None]] = None
+        # 退出上传只允许真正执行一次：托盘「彻底退出」和 start.py 的 finally
+        # 是两条独立的退出路径，都会调 upload_on_exit，用事件标记保证幂等
+        self._exit_upload_done = threading.Event()
 
     def set_sync_callback(self, callback: Callable[[], None]) -> None:
         """设置同步回调函数"""
@@ -277,19 +281,44 @@ class DataSyncManager(LogManager):
 
         仅上传频率为「关闭软件时」且 WebDAV 已启用时执行；失败只记日志，
         不能因为上传阻塞或报错影响正常退出。
+        幂等：托盘退出与主窗口关闭两条路径都会调用这里，只真正上传一次。
         """
         config = get_webdav_config()
         if not config.get('enabled', False):
             return
         if config.get('upload_frequency', 'change') != 'on_exit':
             return
+        if self._exit_upload_done.is_set():
+            self.get_logger.info("退出前上传已执行过，跳过重复调用")
+            return
+        self._exit_upload_done.set()
 
         self.get_logger.info("应用退出，执行退出前上传...")
         try:
+            # 15s 轮询可能恰好正在进行：退出上传是最后机会，等它结束再传，
+            # 否则非阻塞互斥会直接抛「同步正在进行中」导致本次上传被跳过
+            if not self._wait_sync_idle(timeout=15):
+                raise ConflictError('等待进行中的同步超时，本次退出上传已放弃')
             self.sync_to_cloud()
             self.get_logger.info("退出前上传完成")
         except Exception as e:
             self.get_logger.error(f"退出前上传失败: {e}")
+
+    def _wait_sync_idle(self, timeout: float) -> bool:
+        """等待同步互斥锁空闲（有同步在跑时最多等 timeout 秒）
+
+        通过探测式加锁实现：拿到锁说明当前没有同步在执行，立即释放并把
+        锁让给随后的 sync_to_cloud（定时链已被 stop_auto_sync 作废，
+        不会有新的轮询再来抢锁）。返回 False 表示等到超时仍忙。
+        """
+        deadline = time.time() + timeout
+        while True:
+            if self._sync_op_lock.acquire(blocking=False):
+                self._sync_op_lock.release()
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.2)
 
     def get_webdav_config(self) -> Dict[str, Any]:
         """获取WebDAV配置"""
