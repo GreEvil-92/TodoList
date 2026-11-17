@@ -12,7 +12,9 @@ import os
 import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlsplit
 from webdav3.client import Client
+from webdav3.exceptions import RemoteResourceNotFound
 from datetime import datetime, timezone
 from backend.utils.logger import LogManager
 from backend.utils.api_errors import NotFoundError, ValidationError
@@ -35,6 +37,35 @@ def is_attachment_path(relative_path: str) -> bool:
     """
     parts = str(relative_path).replace('\\', '/').strip('/').split('/')
     return bool(parts) and parts[0] == ATTACHMENT_DIR_NAME
+
+
+def _split_webdav_url(url: str) -> tuple:
+    """把用户填写的服务器地址拆成 (hostname, root)。
+
+    webdav3 要求 ``webdav_hostname`` 只含「协议 + 域名」，URL 里的路径必须
+    放到 ``webdav_root``。如果把带路径的完整地址（坚果云默认
+    ``https://dav.jianguoyun.com/dav``）直接塞进 hostname，client 内部的
+    ``webdav.root`` 会是空字符串，``list(get_info=True)`` 就无法把
+    「被查询目录自身」从结果里过滤掉——坚果云的 PROPFIND 必然返回这一条，
+    于是被当成同名子目录继续递归，每轮同步都多打一次无效请求
+    （日志里反复出现的 ``/todolist/todolist not found`` 就是它）。
+
+    Returns:
+        (hostname, root): hostname 形如 ``https://dav.jianguoyun.com``，
+        root 形如 ``/dav``（无路径时为空串）。
+    """
+    raw = (url or '').strip().rstrip('/')
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw, ''
+    return f"{parsed.scheme}://{parsed.netloc}", parsed.path.rstrip('/')
+
+
+def _normalize_remote_path(path: str) -> str:
+    """远程路径归一化：合并重复斜杠、去掉末尾斜杠，根目录返回 '/'"""
+    normalized = re.sub(r'/{2,}', '/', str(path or ''))
+    stripped = normalized.rstrip('/')
+    return stripped or '/'
 
 
 def _parse_webdav_time(time_str: str) -> float:
@@ -85,6 +116,8 @@ class WebDAVClient(LogManager):
         self.username: Optional[str] = None
         self.password: Optional[str] = None
         self.remote_path: Optional[str] = None
+        # 服务器根路径（如坚果云的 /dav），用于把「目录自身」条目从清单里剔除
+        self.root_path: str = ''
 
     # ==================== 配置 ====================
 
@@ -108,14 +141,22 @@ class WebDAVClient(LogManager):
         self.url = url
 
         try:
+            hostname, root_path = _split_webdav_url(url)
+            self.root_path = root_path
             options = {
-                'webdav_hostname': url,
+                'webdav_hostname': hostname,
                 'webdav_login': self.username,
                 'webdav_password': self.password,
-                'disable_check': True
+                # 坚果云对 HEAD 请求返回 403，而 client.check() 正是发 HEAD，
+                # 不短路掉的话内部 list() 的存在性校验会直接抛异常。真正的
+                # 存在性判断由 _exists()（PROPFIND Depth:0）负责。
+                'disable_check': True,
             }
+            if root_path:
+                options['webdav_root'] = root_path
             self.client = Client(options)
-            self.get_logger.info("WebDAV客户端配置成功")
+            # 15s 一次轮询都会新建客户端，这里只能是 DEBUG，否则日志被刷屏
+            self.get_logger.debug(f"WebDAV客户端已就绪: {hostname}{root_path}")
             return True
         except Exception as e:
             self.get_logger.error(f"WebDAV客户端配置失败: {e}")
@@ -160,6 +201,22 @@ class WebDAVClient(LogManager):
 
     # ==================== 远程目录 ====================
 
+    def _exists(self, remote_path: str) -> bool:
+        """判断远程资源是否存在（PROPFIND Depth:0）。
+
+        不能用 ``client.check()``：它发 HEAD 请求，坚果云对 HEAD 返回 403；
+        而本项目为了让 ``list()`` 跑通又必须开着 ``disable_check``，该选项
+        会让 ``check()`` 无脑返回 True——两种情况下 ``check()`` 都不可信。
+        """
+        try:
+            self.client.info(remote_path)
+            return True
+        except RemoteResourceNotFound:
+            return False
+        except Exception as e:
+            self.get_logger.debug(f"探测远程资源失败 {remote_path}: {e}")
+            return False
+
     def _ensure_remote_directory(self, remote_dir: str) -> None:
         """确保远程目录存在，如果不存在则逐级创建"""
         remote_dir = '/' + str(remote_dir).strip('/')
@@ -169,11 +226,8 @@ class WebDAVClient(LogManager):
         current = ''
         for part in [p for p in remote_dir.split('/') if p]:
             current += f'/{part}'
-            try:
-                if self.client.check(current):
-                    continue
-            except Exception:
-                pass
+            if self._exists(current):
+                continue
             try:
                 self.client.mkdir(current)
                 self.get_logger.debug(f"创建远程目录: {current}")
@@ -184,7 +238,7 @@ class WebDAVClient(LogManager):
     def _remote_file_exists(self, remote_path: str) -> bool:
         """检查远程文件是否存在"""
         try:
-            return self.client.check(remote_path)
+            return self._exists(remote_path)
         except Exception as e:
             self.get_logger.error(f"检查远程文件存在性失败: {e}")
             return False
@@ -213,7 +267,13 @@ class WebDAVClient(LogManager):
         self.client.upload_sync(remote_path=remote_file, local_path=local_file)
         self.get_logger.info(f"文件上传成功: {local_file} -> {remote_file}")
 
-    def _collect_remote_info(self) -> Dict[str, Dict[str, Any]]:
+    def _remote_full_path(self, remote_dir: str) -> str:
+        """远程目录在服务器上的完整路径（含服务器 root，如 /dav/todolist）"""
+        root = (self.root_path or '').rstrip('/')
+        target = '/' + (remote_dir or '').strip('/')
+        return _normalize_remote_path(f"{root}{'' if target == '/' else target}")
+
+    def _collect_remote_info(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """递归收集远程同步目录内文件的修改时间与大小（增量上传比对用）。
 
         每层目录一次 PROPFIND（get_info 自带 isdir），不再逐个条目发探测
@@ -221,22 +281,47 @@ class WebDAVClient(LogManager):
         上传兜底，宁可多传不可漏传。
 
         Returns:
-            {相对同步目录的 POSIX 路径: {'modified': UTC时间戳, 'size': 字节数}}
+            {相对同步目录的 POSIX 路径: {'modified': UTC时间戳, 'size': 字节数}}；
+            同步目录本身在云端不存在时返回 None（首次启用、尚未上传过数据
+            的正常状态，调用方据此静默跳过，不能每轮轮询都报一次错）。
         """
         results: Dict[str, Dict[str, Any]] = {}
+        visited: set = set()
 
         def walk(remote_dir: str, prefix: str) -> None:
-            try:
-                items = self.client.list(remote_dir or '/', get_info=True)
-            except Exception as e:
-                self.get_logger.warning(f"列出远程目录失败 {remote_dir or '/'}: {e}")
+            current = _normalize_remote_path(remote_dir or '/')
+            if current in visited:
                 return
+            visited.add(current)
+            try:
+                items = self.client.list(current, get_info=True)
+            except RemoteResourceNotFound:
+                if not prefix:
+                    raise
+                # 云端残留的空目录条目：跳过即可，不算同步失败
+                self.get_logger.debug(f"远程子目录已不存在，跳过: {current}")
+                return
+            except Exception:
+                if not prefix:
+                    raise
+                self.get_logger.debug(f"列出远程子目录失败，跳过: {current}")
+                return
+
+            # PROPFIND 会把「被查询目录自身」也放进结果：必须按完整路径剔除，
+            # 否则它会被当成同名子目录继续递归（请求一个不存在的 /a/a）
+            self_path = self._remote_full_path(current)
             for info in items:
+                entry_path = _normalize_remote_path(info.get('path') or '')
+                if entry_path != '/' and entry_path == self_path:
+                    continue
                 name = str(info.get('name') or '').strip('/')
+                if not name and entry_path != '/':
+                    # 少数服务器不返回 displayname，用 href 末段兜底
+                    name = entry_path.rsplit('/', 1)[-1]
                 if not name:
                     continue
                 if info.get('isdir'):
-                    walk(f"{remote_dir.rstrip('/')}/{name}", f"{prefix}{name}/")
+                    walk(f"{current.rstrip('/')}/{name}", f"{prefix}{name}/")
                     continue
                 entry: Dict[str, Any] = {'size': -1}
                 try:
@@ -249,7 +334,10 @@ class WebDAVClient(LogManager):
                     pass
                 results[f"{prefix}{name}"] = entry
 
-        walk(self.remote_dir or '', '')
+        try:
+            walk(self.remote_dir or '', '')
+        except RemoteResourceNotFound:
+            return None
         return results
 
     @staticmethod
@@ -313,7 +401,8 @@ class WebDAVClient(LogManager):
                 continue
             candidates.append((rel, str(file)))
 
-        remote_info = self._collect_remote_info()
+        # 云端目录不存在时清单为 None，按「全部待传」处理
+        remote_info = self._collect_remote_info() or {}
         ensured_dirs: set = set()
         uploaded = 0
         unchanged = 0
@@ -429,12 +518,18 @@ class WebDAVClient(LogManager):
         local_path = Path(local_dir)
         local_path.mkdir(parents=True, exist_ok=True)
 
-        if not self.remote_dir or not self._remote_file_exists(self.remote_dir):
-            self.get_logger.warning("远程同步目录不存在，跳过下载")
+        if not self.remote_dir:
+            self.get_logger.warning("未配置远程同步目录，跳过下载")
             return 0
 
-        # 一次清单扫描替代逐文件探测：每个文件少发 check/info 各一次请求
+        # 一次清单扫描替代逐文件探测：每个文件少发 check/info 各一次请求。
+        # 不再先单独 check 目录是否存在——清单扫描本身就能判定，少一次请求。
         remote_infos = self._collect_remote_info()
+        if remote_infos is None:
+            # 云端还没有这个同步目录：首次启用、数据尚未上传过的正常状态，
+            # 15s 一轮的轮询不能每次都记一条 WARNING
+            self.get_logger.debug("云端同步目录尚不存在，等待首次上传")
+            return 0
         skipped = 0
         downloaded_count = 0
 

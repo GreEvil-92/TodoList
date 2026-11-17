@@ -16,16 +16,17 @@ if TYPE_CHECKING:
 
 
 def setup_logger(platform_service: PlatformService, name: str = 'todolist',
-                 level: int = logging.INFO, max_bytes: int = 10*1024*1024,
-                 backup_count: int = 5) -> logging.Logger:
+                 level: int = logging.INFO, max_bytes: int = 2*1024*1024,
+                 backup_count: int = 3) -> logging.Logger:
     """配置并返回logger实例
     
     Args:
         platform_service: 平台
         name: logger名称
         level: 日志级别，默认INFO
-        max_bytes: 单个日志文件最大大小，默认10MB
-        backup_count: 保留的日志文件备份数量，默认5个
+        max_bytes: 单个日志文件最大大小，默认2MB（桌面端单文件上限，
+            日志只记事件不记轮询，2MB 足够回看数天；超出后自动轮转）
+        backup_count: 保留的日志文件备份数量，默认3个
     
     Returns:
         logging.Logger: 配置好的logger实例

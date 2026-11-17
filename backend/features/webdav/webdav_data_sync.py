@@ -41,6 +41,10 @@ class DataSyncManager(LogManager):
         # 退出上传只允许真正执行一次：托盘「彻底退出」和 start.py 的 finally
         # 是两条独立的退出路径，都会调 upload_on_exit，用事件标记保证幂等
         self._exit_upload_done = threading.Event()
+        # 同步失败日志去重：断网 / 服务器异常时每 15s 一条 ERROR 同样会把日志
+        # 刷满，改为「同一错误 5 分钟内只报一次」，恢复后补一条 INFO
+        self._failure_lock = threading.Lock()
+        self._last_failure: Optional[Tuple[str, float]] = None
 
     def set_sync_callback(self, callback: Callable[[], None]) -> None:
         """设置同步回调函数"""
@@ -108,9 +112,9 @@ class DataSyncManager(LogManager):
         def upload_wrapper() -> None:
             try:
                 self.sync_to_cloud()
-                self.get_logger.debug("定时上传已完成")
+                self._report_sync_success()
             except Exception as e:
-                self.get_logger.error(f"定时上传出错: {e}")
+                self._report_sync_failure("定时上传", e)
             finally:
                 # 仅当代际未变（未被 stop/重启作废）才续排下一次上传
                 if gen == self._sync_gen:
@@ -125,11 +129,12 @@ class DataSyncManager(LogManager):
         def sync_wrapper() -> None:
             try:
                 self.sync_from_cloud()
+                self._report_sync_success()
                 # 轮询本身不算「事件」：有无变化已由 sync_from_cloud 按级别记录，
                 # 这里再补一条 INFO 就是每 15s 固定刷一行
                 self.get_logger.debug("定时同步已完成")
             except Exception as e:
-                self.get_logger.error(f"定时同步出错: {e}")
+                self._report_sync_failure("定时同步", e)
             finally:
                 # 仅当代际未变（未被 stop/重启作废）才续排下一次同步
                 if gen == self._sync_gen:
@@ -138,6 +143,30 @@ class DataSyncManager(LogManager):
         self.sync_timer = threading.Timer(interval, sync_wrapper)
         self.sync_timer.daemon = True
         self.sync_timer.start()
+
+    # 同一失败信息的折叠窗口（秒）：断网时每轮轮询都会抛同样的异常，
+    # 5 分钟内只保留第一条 ERROR，其余降到 DEBUG
+    FAILURE_LOG_WINDOW = 300
+
+    def _report_sync_failure(self, action: str, error: Exception) -> None:
+        """记录同步失败，相同错误在窗口期内只报一次"""
+        message = f"{action}出错: {error}"
+        now = time.time()
+        with self._failure_lock:
+            previous = self._last_failure
+            self._last_failure = (message, now)
+        if previous and previous[0] == message and now - previous[1] < self.FAILURE_LOG_WINDOW:
+            self.get_logger.debug(f"{message}（{self.FAILURE_LOG_WINDOW} 秒内重复，已折叠）")
+            return
+        self.get_logger.error(message)
+
+    def _report_sync_success(self) -> None:
+        """同步恢复正常时补一条 INFO，避免「出错后无声恢复」"""
+        with self._failure_lock:
+            had_failure = self._last_failure is not None
+            self._last_failure = None
+        if had_failure:
+            self.get_logger.info("数据同步已恢复正常")
 
     def _new_client(self) -> WebDAVClient:
         """按当前配置新建一个 WebDAV 客户端实例。
