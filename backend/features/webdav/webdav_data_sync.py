@@ -108,7 +108,7 @@ class DataSyncManager(LogManager):
         def upload_wrapper() -> None:
             try:
                 self.sync_to_cloud()
-                self.get_logger.info("定时上传完成")
+                self.get_logger.debug("定时上传已完成")
             except Exception as e:
                 self.get_logger.error(f"定时上传出错: {e}")
             finally:
@@ -125,7 +125,9 @@ class DataSyncManager(LogManager):
         def sync_wrapper() -> None:
             try:
                 self.sync_from_cloud()
-                self.get_logger.info("定时同步中")
+                # 轮询本身不算「事件」：有无变化已由 sync_from_cloud 按级别记录，
+                # 这里再补一条 INFO 就是每 15s 固定刷一行
+                self.get_logger.debug("定时同步已完成")
             except Exception as e:
                 self.get_logger.error(f"定时同步出错: {e}")
             finally:
@@ -176,19 +178,25 @@ class DataSyncManager(LogManager):
             self._sync_op_lock.release()
             raise
 
-    def sync_from_cloud(self, is_overwrite: bool = False) -> None:
+    def sync_from_cloud(self, is_overwrite: bool = False) -> int:
+        """从云端拉取数据；返回本次实际下载的文件数（0 = 无变化）"""
         client, local_dir = self._prepare_sync()
         self.is_syncing = True
         try:
-            self.get_logger.info("开始从云端同步数据...")
-            client.download_app_dir(local_dir, is_overwrite, self.syncs_attachment_files)
+            downloaded = client.download_app_dir(local_dir, is_overwrite, self.syncs_attachment_files)
             self.last_sync_time = datetime.now()
-            self.get_logger.info("云端数据同步成功")
-            if self.on_sync_callback:
+            if downloaded:
+                self.get_logger.info(f"云端数据同步成功，更新 {downloaded} 个文件")
+            else:
+                # 轮询常态：云端与本地一致，INFO 级每 15s 一条会把日志刷成几 MB，
+                # 现象就是「什么都没改 backend.log 也一直在动」
+                self.get_logger.debug("云端数据同步完成：无变化")
+            if downloaded and self.on_sync_callback:
                 try:
                     self.on_sync_callback()
                 except Exception as e:
                     self.get_logger.error(f"同步回调执行失败: {e}")
+            return downloaded
         finally:
             self.is_syncing = False
             self._sync_op_lock.release()
@@ -214,18 +222,22 @@ class DataSyncManager(LogManager):
             self.get_logger.error(f"上传前 WAL 落盘出错: {e}")
             return False
 
-    def sync_to_cloud(self) -> None:
+    def sync_to_cloud(self) -> Dict[str, int]:
+        """把本地数据增量上传到云端；返回 {'uploaded':n,'unchanged':n,'skipped':n}"""
         client, local_dir = self._prepare_sync()
         self.is_syncing = True
         try:
-            self.get_logger.info("开始上传数据到云端...")
             if not os.path.exists(local_dir):
                 raise NotFoundError(f'本地数据目录不存在: {local_dir}')
             if not self._checkpoint_before_upload():
                 raise DatabaseError('数据库 WAL 未能落盘，本次上传已取消')
-            client.upload_app_dir(local_dir, self.syncs_attachment_files)
+            stats = client.upload_app_dir(local_dir, self.syncs_attachment_files)
             self.last_sync_time = datetime.now()
-            self.get_logger.info("数据上传到云端成功")
+            if isinstance(stats, dict) and stats.get('uploaded'):
+                self.get_logger.info(f"数据上传到云端成功，新传 {stats['uploaded']} 个文件")
+            else:
+                self.get_logger.debug("数据上传完成：内容未变化，已跳过上传")
+            return stats
         finally:
             self.is_syncing = False
             self._sync_op_lock.release()
@@ -299,8 +311,11 @@ class DataSyncManager(LogManager):
             # 否则非阻塞互斥会直接抛「同步正在进行中」导致本次上传被跳过
             if not self._wait_sync_idle(timeout=15):
                 raise ConflictError('等待进行中的同步超时，本次退出上传已放弃')
-            self.sync_to_cloud()
-            self.get_logger.info("退出前上传完成")
+            stats = self.sync_to_cloud()
+            if isinstance(stats, dict) and stats.get('uploaded'):
+                self.get_logger.info(f"退出前上传完成，新传 {stats['uploaded']} 个文件")
+            else:
+                self.get_logger.info("退出前上传完成：内容未变化，无需上传")
         except Exception as e:
             self.get_logger.error(f"退出前上传失败: {e}")
 

@@ -24,6 +24,8 @@ import shutil
 import sqlite3
 import time
 
+from backend.features.webdav.sync_fingerprint import is_state_file
+
 # WAL 模式的边车文件后缀（紧跟在主库文件名之后，如 todo.db-wal / todo.db-shm）
 DB_SIDECAR_SUFFIXES = ('-wal', '-shm')
 # 本模块下载临时文件 / 备份文件的后缀，这些文件一律不参与云同步
@@ -39,14 +41,16 @@ _REPLACE_RETRY_DELAY = 0.2
 def is_sync_excluded_file(relative_name: str) -> bool:
     """相对应用数据目录的文件名是否不应参与云同步。
 
-    覆盖三类：WAL 边车（套用到另一个主库上会写坏库）、换库临时文件、
-    换库备份文件。
+    覆盖四类：WAL 边车（套用到另一个主库上会写坏库）、换库临时文件、
+    换库备份文件、上传指纹记录（纯本地状态，传到云端毫无意义）。
     """
     name = str(relative_name).replace('\\', '/')
     # 只拦数据目录顶层的 todo.db-wal 这类文件；附件目录下同名后缀不受影响
     if '/' in name:
         return False
     base = os.path.basename(name)
+    if is_state_file(base):
+        return True
     return (base.endswith(DB_SIDECAR_SUFFIXES)
             or base.endswith((SYNC_TMP_SUFFIX, SYNC_BAK_SUFFIX)))
 

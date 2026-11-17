@@ -18,6 +18,8 @@ from backend.utils.logger import LogManager
 from backend.utils.api_errors import NotFoundError, ValidationError
 from backend.features.webdav.db_sync_safety import (
     SYNC_TMP_SUFFIX, is_sync_excluded_file, safe_replace_live_db)
+from backend.features.webdav.sync_fingerprint import (
+    fingerprint_of, load_state, save_state)
 
 # 本地应用数据目录中需要同步的数据库文件名
 DB_FILE_NAME = 'todo.db'
@@ -269,16 +271,23 @@ class WebDAVClient(LogManager):
         return (remote_info['size'] == local_size
                 and remote_modified + 1 >= local_modified)
 
-    def upload_app_dir(self, local_dir: str, include_attachments: bool = True) -> None:
+    def upload_app_dir(self, local_dir: str, include_attachments: bool = True) -> Dict[str, int]:
         """将本地应用数据目录（todo.db + attachment）增量上传到远程同步目录
 
-        上传前先拉一次远程文件清单，内容未变化的文件直接跳过——改一个
-        任务只需重传 todo.db，几百 MB 的历史附件不再反复上传。
+        两层增量判定：
+        1. 云端「大小一致 + 时间不旧」直接跳过（原有逻辑）；
+        2. 时间变了但内容哈希与上次成功上传时一致，同样跳过——SQLite 在
+           OneDrive 符号链接目录里即使不改数据也会刷新主库修改时间，
+           只看时间会导致「什么都没改也每次退出发一遍整库」。
 
         Args:
             local_dir: 本地应用数据目录
             include_attachments: 是否上传附件实体文件；为 False 时只上传 todo.db
                 （附件关联信息仍随数据库同步，仅实体文件不参与同步）
+
+        Returns:
+            dict: ``{'uploaded': n, 'unchanged': n, 'skipped': n}``，
+            uploaded 为 0 表示云端本来就与本地一致，本次没有任何请求发出。
         """
         local_path = Path(local_dir)
         if not local_path.exists():
@@ -308,17 +317,43 @@ class WebDAVClient(LogManager):
         ensured_dirs: set = set()
         uploaded = 0
         unchanged = 0
+        # 指纹表：记录「上次真正上传的内容哈希」，用于识别时间被刷新但内容未变
+        prev_state = load_state(str(local_path))
+        new_state: Dict[str, Dict[str, Any]] = {}
         for rel, local_file in candidates:
             info = remote_info.get(rel)
             if info is not None and self._remote_unchanged(info, local_file):
                 unchanged += 1
                 continue
+            fingerprint = fingerprint_of(local_file)
+            prev = prev_state.get(rel)
+            if (fingerprint is not None and prev is not None
+                    and prev.get('sha256') == fingerprint['sha256']
+                    and prev.get('size') == fingerprint['size']
+                    and info is not None
+                    and info.get('size', -1) == fingerprint['size']):
+                # 内容与上次上传时完全一致，只是修改时间被刷新了 → 没必要重传
+                unchanged += 1
+                new_state[rel] = fingerprint
+                continue
             self.upload_file(self._remote_join(rel), local_file, ensured_dirs)
             uploaded += 1
-        self.get_logger.info(
-            f"数据目录上传完成：新传 {uploaded} 个，云端已一致跳过 {unchanged} 个"
-            + (f"，跳过附件实体文件 {skipped} 个" if skipped else '')
-        )
+            if fingerprint is not None:
+                new_state[rel] = fingerprint
+        save_state(str(local_path), new_state)
+
+        if uploaded:
+            self.get_logger.info(
+                f"数据目录上传完成：新传 {uploaded} 个，云端已一致跳过 {unchanged} 个"
+                + (f"，跳过附件实体文件 {skipped} 个" if skipped else '')
+            )
+        else:
+            # 无变更属于常态，压到 DEBUG，避免轮询/退出时反复刷屏
+            self.get_logger.debug(
+                f"数据目录上传完成：无变更（云端已一致 {unchanged} 个"
+                + (f"，跳过附件实体文件 {skipped} 个" if skipped else '') + "）"
+            )
+        return {'uploaded': uploaded, 'unchanged': unchanged, 'skipped': skipped}
 
     # ==================== 下载 ====================
 
@@ -365,7 +400,8 @@ class WebDAVClient(LogManager):
                     local_modified = os.path.getmtime(ref_path)
                     # 加1秒容差，避免系统时间微小差异导致误判
                     if remote_modified <= local_modified + 1:
-                        self.get_logger.info("远程文件版本不新于本地，跳过下载")
+                        # 每 15s 轮询都会走到这里，属正常「无新版本」，用 DEBUG
+                        self.get_logger.debug("远程文件版本不新于本地，跳过下载")
                         return False
                 except Exception as e:
                     # 时间解析失败时直接下载，避免同步中断
@@ -375,7 +411,7 @@ class WebDAVClient(LogManager):
         return True
 
     def download_app_dir(self, local_dir: str, is_overwrite: bool = False,
-                         include_attachments: bool = True) -> None:
+                         include_attachments: bool = True) -> int:
         """从远程同步目录整体下载到本地应用数据目录
 
         - todo.db：按版本（修改时间）判断，避免覆盖较新的本地数据
@@ -386,13 +422,16 @@ class WebDAVClient(LogManager):
             is_overwrite: 是否强制用远程数据覆盖本地
             include_attachments: 是否下载附件实体文件；为 False 时只拉取 todo.db
                 （附件关联信息仍随数据库同步，仅实体文件不参与同步）
+
+        Returns:
+            int: 本次实际下载的文件数，0 表示云端与本地一致
         """
         local_path = Path(local_dir)
         local_path.mkdir(parents=True, exist_ok=True)
 
         if not self.remote_dir or not self._remote_file_exists(self.remote_dir):
             self.get_logger.warning("远程同步目录不存在，跳过下载")
-            return
+            return 0
 
         # 一次清单扫描替代逐文件探测：每个文件少发 check/info 各一次请求
         remote_infos = self._collect_remote_info()
@@ -416,6 +455,13 @@ class WebDAVClient(LogManager):
                     remote_file, str(local_file), is_overwrite, rinfo)
                 if downloaded:
                     downloaded_count += 1
+                    # 刚同步下来的库就是「云端当前内容」，记下它的指纹，
+                    # 否则下次上传会因哈希与上次上传时不同而白传一遍
+                    fingerprint = fingerprint_of(str(local_file))
+                    if fingerprint is not None:
+                        state = load_state(str(local_path))
+                        state[rel] = fingerprint
+                        save_state(str(local_path), state)
                     # 同步日历提醒
                     try:
                         remote_modified = rinfo.get('modified')
@@ -434,10 +480,18 @@ class WebDAVClient(LogManager):
                 except Exception as e:
                     self.get_logger.error(f"下载附件失败 {remote_file}: {e}")
 
-        self.get_logger.info(
-            f"数据目录下载完成，共下载 {downloaded_count} 个文件"
-            + (f"，跳过附件实体文件 {skipped} 个" if skipped else '')
-        )
+        if downloaded_count:
+            self.get_logger.info(
+                f"数据目录下载完成，共下载 {downloaded_count} 个文件"
+                + (f"，跳过附件实体文件 {skipped} 个" if skipped else '')
+            )
+        else:
+            # 15s 轮询绝大部分时间都是「没有变化」，压到 DEBUG 免得日志被刷满
+            self.get_logger.debug(
+                "数据目录下载完成：云端无新内容"
+                + (f"（跳过附件实体文件 {skipped} 个）" if skipped else '')
+            )
+        return downloaded_count
 
     def _get_service(self) -> Any:
         """获取平台服务（日历同步等平台能力）。
