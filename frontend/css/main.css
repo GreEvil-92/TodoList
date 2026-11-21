@@ -188,8 +188,8 @@
 }
 
 #settings-btn .settings-icon {
-    width: 28px;
-    height: 28px;
+    width: 34px;
+    height: 34px;
     object-fit: contain;
     pointer-events: none;
 }
@@ -203,8 +203,8 @@
 }
 
 #desktop-widget-btn .desktop-widget-icon {
-    width: 28px;
-    height: 28px;
+    width: 34px;
+    height: 34px;
     object-fit: contain;
     pointer-events: none;
 }
