@@ -185,6 +185,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    padding: 0;    /* 去掉按钮默认内边距，盒子紧贴图标，头部三控件按图标均分间距 */
 }
 
 #settings-btn .settings-icon {
@@ -200,6 +201,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
 }
 
 #desktop-widget-btn .desktop-widget-icon {
