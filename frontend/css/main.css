@@ -136,13 +136,13 @@
 /* active = 深色：滑块移到右半边，太阳变月亮，星星浮现 */
 .day-night-toggle.active {
     background-position: 0 0;
-    /* v5.0：基础的 box-shadow 下半边框是白天配色的 #ffe/#ddd，深色下会发亮，
-       这里覆盖为与上半边框一致（外侧 #999 + 内侧 #333） */
+    /* 深色模式下外侧亮边（#999/#ffe）直接透明化，让开关融入深色侧边栏；
+       内侧 inset 用更深的 #1a1a1a 保留一点立体感 */
     box-shadow:
-        0 -3px 4px #999,
-        inset 0 3px 5px #333,
-        0 4px 4px #999,
-        inset 0 -3px 5px #333;
+        0 -3px 4px transparent,
+        inset 0 3px 5px #1a1a1a,
+        0 4px 4px transparent,
+        inset 0 -3px 5px #1a1a1a;
 }
 
 .day-night-toggle.active::before {
