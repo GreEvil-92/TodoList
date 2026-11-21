@@ -34,7 +34,6 @@ class TodoDatabase(AllCrudMixins):
             # 配置不可用时按版本号 0 处理，此时环境多半也已退化到默认路径，
             # 交给调用方随正常路径解析即可，不影响可用性
             return 0
-
     @property
     def db_path(self) -> str:
         """当前数据文件路径。
@@ -65,11 +64,12 @@ class TodoDatabase(AllCrudMixins):
     def _connect(self) -> sqlite3.Connection:
         """建立连接并应用统一的 PRAGMA。"""
         conn = sqlite3.connect(self.db_path, timeout=_CONNECT_TIMEOUT)
-        # 统一的 PRAGMA：
+        # 每连接仅需设置「连接级」PRAGMA：
         # - foreign_keys：启用外键级联删除（默认关闭，导致 ON DELETE CASCADE 失效）
-        # - journal_mode=WAL：读写并发，避免后台线程轮询与主线程互相阻塞
+        # - synchronous：WAL 下的安全/性能平衡点
+        # journal_mode=WAL 是库级持久属性，只在 init_database 设置一次，
+        # 每次连接重复设置会白白竞争写锁
         conn.execute('PRAGMA foreign_keys = ON')
-        conn.execute('PRAGMA journal_mode = WAL')
         conn.execute('PRAGMA synchronous = NORMAL')
         # 以列名访问结果，彻底摆脱 row[0] 这类位置依赖
         conn.row_factory = sqlite3.Row
@@ -110,6 +110,13 @@ class TodoDatabase(AllCrudMixins):
 
     def init_database(self) -> None:
         """初始化数据库表结构与索引"""
+        # WAL 是库级持久属性，整个生命周期只需设置一次（换库/新建库时走这里）
+        conn = sqlite3.connect(self.db_path, timeout=_CONNECT_TIMEOUT)
+        try:
+            conn.execute('PRAGMA journal_mode = WAL')
+            conn.commit()
+        finally:
+            conn.close()
         with self.tx() as conn:
             cursor = conn.cursor()
             schema.initialize(cursor)

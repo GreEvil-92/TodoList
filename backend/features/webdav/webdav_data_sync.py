@@ -27,6 +27,11 @@ class DataSyncManager(LogManager):
         # 若只靠 cancel() 停止，正在执行中的 wrapper 仍会续排新定时器（停止失效/
         # 重启后双链并发），故续排前必须校对代际号
         self._sync_gen: int = 0
+        # 定时器生命周期锁：把「校对代际号 + 续排定时器」与「递增代际 + cancel"
+        # 放进同一临界区，否则存在微小竞态——wrapper 刚校对完代际号还没续排，
+        # stop 恰好递增代际并 cancel 旧定时器，wrapper 再续排出一个孤儿定时器，
+        # 停止后仍多跑一次同步
+        self._timer_lock = threading.RLock()
         # 互斥锁：is_syncing 只是给外部看的状态标记，真正的「同一时刻只允许
         # 一次同步」靠非阻塞 acquire 实现——标记的检查和置位不是原子的，
         # 15s 轮询和用户手动同步同时进来时两者都可能通过检查
@@ -71,16 +76,17 @@ class DataSyncManager(LogManager):
         interval = max(5, int(config.get('sync_interval', 15)))  # 默认15s
 
         # 取消之前的定时器，并递增代际使任何在途 wrapper 的自续失效
-        self._sync_gen += 1
-        gen = self._sync_gen
-        if self.sync_timer:
-            self.sync_timer.cancel()
-        if self.upload_timer:
-            self.upload_timer.cancel()
-            self.upload_timer = None
+        with self._timer_lock:
+            self._sync_gen += 1
+            gen = self._sync_gen
+            if self.sync_timer:
+                self.sync_timer.cancel()
+            if self.upload_timer:
+                self.upload_timer.cancel()
+                self.upload_timer = None
 
-        # 启动定时同步（云端拉取不受上传频率影响，始终按 sync_interval 轮询）
-        self._schedule_sync(interval, gen)
+            # 启动定时同步（云端拉取不受上传频率影响，始终按 sync_interval 轮询）
+            self._schedule_sync(interval, gen)
         self.get_logger.info(f"自动同步已启动，间隔: {interval}秒")
 
         # 上传频率为「每小时」时，另起一条固定间隔的上传定时器；
@@ -92,20 +98,22 @@ class DataSyncManager(LogManager):
 
     def stop_auto_sync(self) -> None:
         """停止自动同步"""
-        # 先递增代际，让正在执行中的 wrapper 在 finally 里不再续排
-        self._sync_gen += 1
-        if self.sync_timer:
-            self.sync_timer.cancel()
-            self.sync_timer = None
-            self.get_logger.info("自动同步已停止")
-        if self.upload_timer:
-            self.upload_timer.cancel()
-            self.upload_timer = None
-            self.get_logger.info("定时上传已停止")
-        with self._debounce_lock:
-            if self._debounce_timer:
-                self._debounce_timer.cancel()
-                self._debounce_timer = None
+        # 代际递增与定时器 cancel 必须和 wrapper 的「校对代际+续排」互斥，
+        # 否则 wrapper 校对通过后、stop 递增代际前，会续排出孤儿定时器
+        with self._timer_lock:
+            self._sync_gen += 1
+            if self.sync_timer:
+                self.sync_timer.cancel()
+                self.sync_timer = None
+                self.get_logger.info("自动同步已停止")
+            if self.upload_timer:
+                self.upload_timer.cancel()
+                self.upload_timer = None
+                self.get_logger.info("定时上传已停止")
+            with self._debounce_lock:
+                if self._debounce_timer:
+                    self._debounce_timer.cancel()
+                    self._debounce_timer = None
 
     def _schedule_upload(self, interval: int, gen: int) -> None:
         """安排下次定时上传"""
@@ -117,8 +125,9 @@ class DataSyncManager(LogManager):
                 self._report_sync_failure("定时上传", e)
             finally:
                 # 仅当代际未变（未被 stop/重启作废）才续排下一次上传
-                if gen == self._sync_gen:
-                    self._schedule_upload(interval, gen)
+                with self._timer_lock:
+                    if gen == self._sync_gen:
+                        self._schedule_upload(interval, gen)
 
         self.upload_timer = threading.Timer(interval, upload_wrapper)
         self.upload_timer.daemon = True
@@ -136,9 +145,11 @@ class DataSyncManager(LogManager):
             except Exception as e:
                 self._report_sync_failure("定时同步", e)
             finally:
-                # 仅当代际未变（未被 stop/重启作废）才续排下一次同步
-                if gen == self._sync_gen:
-                    self._schedule_sync(interval, gen)
+                # 仅当代际未变（未被 stop/重启作废）才续排下一次同步；
+                # 校对与续排必须在 _timer_lock 内，避免与 stop_auto_sync 竞态
+                with self._timer_lock:
+                    if gen == self._sync_gen:
+                        self._schedule_sync(interval, gen)
 
         self.sync_timer = threading.Timer(interval, sync_wrapper)
         self.sync_timer.daemon = True

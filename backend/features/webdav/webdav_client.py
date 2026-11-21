@@ -55,6 +55,10 @@ def _split_webdav_url(url: str) -> tuple:
         root 形如 ``/dav``（无路径时为空串）。
     """
     raw = (url or '').strip().rstrip('/')
+    # 用户可能漏填协议头（如 dav.jianguoyun.com/dav），urlsplit 会得到空 scheme
+    # 直接返回原串会让 webdav3 初始化失败；默认按 https 补全
+    if raw and '://' not in raw:
+        raw = 'https://' + raw
     parsed = urlsplit(raw)
     if not parsed.scheme or not parsed.netloc:
         return raw, ''

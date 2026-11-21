@@ -115,7 +115,9 @@ class App {
         externalLinks.forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault(); // 阻止链接在 WebView 内打开
-                var url = e.target.href;
+                // e.target 是实际被点击的子元素（如 <span>），不一定是 <a>，
+                // 用 e.currentTarget 保证永远取到绑定事件的链接地址
+                const url = e.currentTarget.href;
                 Utils.apiCall({
                     apiMethod: 'open_in_browser',
                     apiArgs: [url],

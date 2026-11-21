@@ -47,11 +47,16 @@ def validate_due_date(task_data: Union[Dict[str, Any], str]) -> Dict[str, Union[
 
     try:
         due_date = datetime.fromisoformat(due_date_str)
+        # 前端主流路径传本地 naive 串，但 timeline 等处可能带 Z/+08:00 尾，
+        # aware 与 naive datetime.now() 比较会抛 TypeError（except ValueError
+        # 接不住，直接冒泡成未预期异常）。统一取本地墙上时间处理
+        if due_date.tzinfo is not None:
+            due_date = due_date.replace(tzinfo=None)
         now = datetime.now()
         if due_date < now:
             return {'valid': False, 'message': '截止时间不能早于当前时间'}
         return {'valid': True, 'message': ''}
-    except ValueError:
+    except (ValueError, TypeError):
         return { 'valid': False, 'message': '截止时间格式无效'}
 
 
@@ -487,6 +492,10 @@ class TaskApiMixin:
     def update_todo(self, task_id: str, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """更新任务"""
         old_task = self.db.get_task(task_id)
+        # 任务不存在（已被另一端删除/并发删除）时必须报错，而不是让
+        # db.update_task 返回 None 被归一成「操作成功」误导前端
+        if old_task is None:
+            raise NotFoundError(f'任务不存在: {task_id}')
         # 「截止时间不早于当前」只对「本次真的在改截止时间」生效：
         # 前端常回传含原 dueDate 的完整对象，若无条件校验，
         # 已逾期的历史任务连改标题/分类都会被拒绝（导入历史任务是合法的，编辑亦然）

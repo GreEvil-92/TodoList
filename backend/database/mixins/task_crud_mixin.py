@@ -856,7 +856,9 @@ class TaskCrudMixin:
             # 同一周期族里已经存在更晚的实例时不再续建：
             # 避免「完成 -> 重新开启 -> 再完成」这类反复操作生成重复待办
             later = conn.execute(
-                'SELECT id FROM tasks WHERE id != ? AND due_date > ? '
+                # due_date 用 datetime() 包一层做时间序比较，不走文本序——
+                # 历史数据若格式不一（带时区/毫秒/纯日期）文本序会误判
+                'SELECT id FROM tasks WHERE id != ? AND datetime(due_date) > datetime(?) '
                 'AND (parent_task_id = ? OR id = ?) LIMIT 1',
                 (task_id, completed_at.isoformat(), root['id'], root['id']),
             ).fetchone()
