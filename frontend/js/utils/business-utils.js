@@ -79,6 +79,41 @@ const ThemeManager = {
         }
 
         this.observeTitleBarTheme();
+        this.initDayNightToggle();
+    },
+
+    /**
+     * 侧边栏的昼夜切换开关（CSS 绘制的太阳/月亮）。
+     *
+     * - 点击：深色 ↔ 默认 之间切换（处于自定义配色时点一下进深色，再点回默认）；
+     * - 状态：active = 基底为深色（含自定义配色但基底是深色的情况），
+     *   监听 theme-mode-changed，在设置页改主题时按钮跟着动，两边永不同步脱节。
+     */
+    initDayNightToggle() {
+        const toggle = document.getElementById('day-night-toggle');
+        if (!toggle || this._dayNightBound) return;
+        this._dayNightBound = true;
+
+        const sync = () => {
+            const isDark = this.mode === this.MODES.DARK
+                || (this.mode === this.MODES.CUSTOM && this.currentBaseTheme() === 'dark');
+            toggle.classList.toggle('active', isDark);
+        };
+
+        toggle.addEventListener('click', () => {
+            this.setMode(this.mode === this.MODES.DARK ? this.MODES.DEFAULT : this.MODES.DARK);
+        });
+
+        // 键盘可达：Enter / 空格 触发
+        toggle.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggle.click();
+            }
+        });
+
+        document.addEventListener('theme-mode-changed', sync);
+        sync();
     },
 
     /** 当前生效的基底（浅色/深色）：自定义模式下由配置的 baseTheme 决定 */
