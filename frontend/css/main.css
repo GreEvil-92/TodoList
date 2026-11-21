@@ -39,8 +39,9 @@
 }
 
 .sidebar-header-actions {
+    flex: 1;
     display: flex;
-    gap: var(--spacing-sm);
+    justify-content: space-between;
     align-items: center;
 }
 
@@ -187,8 +188,8 @@
 }
 
 #settings-btn .settings-icon {
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     object-fit: contain;
     pointer-events: none;
 }
@@ -202,8 +203,8 @@
 }
 
 #desktop-widget-btn .desktop-widget-icon {
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     object-fit: contain;
     pointer-events: none;
 }
